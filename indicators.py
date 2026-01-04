@@ -107,3 +107,15 @@ class Indicator:
         df["adx"] = df["dx"].ewm(alpha=1/period, adjust=False).mean()
 
         return df["adx"].tolist()
+
+    # get average volume
+    def get_avg_volume_last(self, volume_prices, window=15):
+        """
+        Calculate average volume of last N candles
+        volume_prices : list of volumes (e.g. last 200 volumes)
+        window        : number of last candles (default 15)
+        """
+        if len(volume_prices) < window:
+            return sum(volume_prices) / len(volume_prices)
+
+        return sum(volume_prices[-window:]) / window
