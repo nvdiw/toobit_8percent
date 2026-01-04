@@ -2,9 +2,12 @@ import requests
 import time
 from datetime import datetime, timezone
 from indicators import Indicator
+from telegram_bot import TelegramNotifier
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
+BOT_TOKEN = "TOKEN"
+CHAT_ID = int("CHAT_ID")
 
 current_position = None  # None | "long" | "short"
 
@@ -56,6 +59,7 @@ def ma_strategy():
     candle_move_threshold = 0.0082 # 0.8٪
 
     data = (get_ohlcv("BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
+    signal_message = TelegramNotifier(bot_token=BOT_TOKEN, chat_id = CHAT_ID)
 
     for i in range(len(data) - 1):
         open_times.append(str(datetime.fromtimestamp(data[i][0] / 1000, tz=timezone.utc)))
@@ -64,7 +68,7 @@ def ma_strategy():
         low_prices.append(float(data[i][3]))
         close_prices.append(float(data[i][4]))
         volume_prices.append(float(data[i][5]))
-        close_times.append(str(datetime.fromtimestamp(data[i][6] / 1000, tz=timezone.utc)))
+        close_times.append(str(datetime.fromtimestamp((data[i][6] / 1000) + 1, tz=timezone.utc)))
 
     # ---- get MA/EMA ----
     indicator = Indicator(close_prices, period=None)
@@ -79,19 +83,15 @@ def ma_strategy():
         high_prices,
         low_prices,
         close_prices,
-        period=14
-    )[-1]
+        period=14)[-1]
     
-    print("the price is:", open_prices[-1])
-    print("volume:", volume_prices[-1])
-    print("ADX:", adx)
-    print("ma_200:", ma_200)
 
     # Calculate MA Distance
     ma_distance = abs(ema_14 - ma_50) / ma_50
 
     # Calculate Distance New Candle Move and Last Candle Move
     last_candle_move = abs(close_prices[-1] - close_prices[-2]) / close_prices[-2]
+
 
     # ===================== OPEN LONG =====================
     if ma_130 >= ma_200 and ema_14 > ma_50 and current_position is None:
@@ -120,11 +120,18 @@ def ma_strategy():
                 if not (volume_pass and strong_candle):
                     return
 
+            # ---- open order ----
+            print("Open LONG at price:", close_prices[-1], "$", "| Open Time:", close_times[-1])
+            signal_message.send_open_long(price= close_prices[-1], time_str= close_times[-1])
+            current_position = "long"
+
     # ===================== CLOSE LONG =====================
     if current_position == "long":
         if (ema_14 < ma_50) or (ma_130 < ma_200):
             # CLOSE LONG
-            print("close long now")
+            print("Close LONG at price:", close_prices[-1], "$", "| Close Time:", close_times[-1])
+            print("-" * 90)
+            signal_message.send_close_long(price= close_prices[-1], time_str= close_times[-1])
             current_position = None
 
 
@@ -155,12 +162,19 @@ def ma_strategy():
                 if not (volume_pass and strong_candle):
                     return
     
+            # ---- open order ----
+            print("Open SHORT at price:", close_prices[-1], "$", "| Open Time:", close_times[-1])
+            signal_message.send_open_short(price= close_prices[-1], time_str= close_times[-1])
+            current_position = "short"
+
 
     # ===================== CLOSE SHORT =====================
     if current_position == "short":
         if (ema_14[i] > ma_50[i]) or (ma_130[i] >= ma_200[i]):
             # CLOSE SHORT
-            print("close short now")
+            print("Close SHORT at price:", close_prices[-1], "$", "| Close Time:", close_times[-1])
+            print("-" * 90)
+            signal_message.send_close_short(price= close_prices[-1], time_str= close_times[-1])
             current_position = None
 
 
