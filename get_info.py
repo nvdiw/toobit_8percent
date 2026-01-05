@@ -3,6 +3,7 @@ import time
 from datetime import datetime, timezone
 from indicators import Indicator
 from telegram_bot import TelegramNotifier
+from database import Database
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
@@ -15,8 +16,7 @@ current_position = None  # None | "long" | "short"
 def get_ohlcv(
     symbol="BTCUSDT",
     interval="15m",
-    limit=100
-):
+    limit=100):
     """
     Fetch OHLCV data from Binance
     
@@ -58,7 +58,7 @@ def ma_strategy():
     ma_distance_threshold = 0.00204  # 0.2٪
     candle_move_threshold = 0.0082 # 0.8٪
 
-    data = (get_ohlcv("BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
+    data = (get_ohlcv(symbol= "BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
     signal_message = TelegramNotifier(bot_token=BOT_TOKEN, chat_id = CHAT_ID)
 
     for i in range(len(data) - 1):
@@ -70,6 +70,19 @@ def ma_strategy():
         volume_prices.append(float(data[i][5]))
         close_times.append(str(datetime.fromtimestamp((data[i][6] / 1000) + 1, tz=timezone.utc)))
 
+    # move data to database.db
+    db = Database(db_name="database.db")
+    print("inserting data to database.db")
+    db.insert_data(symbol= "BTCUSDT",
+                   open_times= open_times[-1],
+                   open_prices= open_prices[-1],
+                   high_prices= high_prices[-1],
+                   low_prices= low_prices[-1],
+                   close_prices= close_prices[-1],
+                   volume_prices= volume_prices[-1],
+                   close_times= close_times[-1]
+                   )
+    
     # ---- get MA/EMA ----
     indicator = Indicator(close_prices, period=None)
     ema_14 = indicator.get_EMA(14)[-1]
