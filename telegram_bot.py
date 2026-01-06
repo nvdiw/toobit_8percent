@@ -8,7 +8,7 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
 
-    def send_open_long(self, price, time_str, symbol=None):
+    def send_open_long(self, price, time_str, symbol=None, margin=None, position_size=None, leverage=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -19,6 +19,9 @@ class TelegramNotifier:
             f"📊 Symbol: {symbol}"
         )
 
+        if margin is not None and position_size is not None and leverage is not None:
+            message += f"\n💸 Margin: {margin} $ | Size: {position_size:.6f} | Leverage: {leverage}x"
+
         payload = {
             "chat_id": self.chat_id,
             "text": message,
@@ -28,7 +31,7 @@ class TelegramNotifier:
         requests.post(self.base_url, data=payload)
 
 
-    def send_close_long(self, price, time_str, symbol=None, reason=None):
+    def send_close_long(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, balance_before=None, balance_after=None, pnl_percent=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -38,6 +41,12 @@ class TelegramNotifier:
             f"🕒 Time: {time_str}\n"
             f"📊 Symbol: {symbol}"
         )
+
+        if profit is not None and profit_percent is not None:
+            message += f"\n📈 P/L: {profit} $ ({round(profit_percent,2)} %)"
+
+        if balance_before is not None and balance_after is not None:
+            message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
 
         if reason:
             message += f"\n📉 Reason: {reason}"
@@ -51,7 +60,7 @@ class TelegramNotifier:
         requests.post(self.base_url, data=payload)
 
 
-    def send_open_short(self, price, time_str, symbol=None):
+    def send_open_short(self, price, time_str, symbol=None, margin=None, position_size=None, leverage=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -62,6 +71,9 @@ class TelegramNotifier:
             f"📊 Symbol: {symbol}"
         )
 
+        if margin is not None and position_size is not None and leverage is not None:
+            message += f"\n💸 Margin: {margin} $ | Size: {position_size:.6f} | Leverage: {leverage}x"
+
         payload = {
             "chat_id": self.chat_id,
             "text": message,
@@ -71,7 +83,7 @@ class TelegramNotifier:
         requests.post(self.base_url, data=payload)
 
 
-    def send_close_short(self, price, time_str, symbol=None, reason=None):
+    def send_close_short(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, balance_before=None, balance_after=None, pnl_percent=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -81,6 +93,12 @@ class TelegramNotifier:
             f"🕒 Time: {time_str}\n"
             f"📊 Symbol: {symbol}"
         )
+
+        if profit is not None and profit_percent is not None:
+            message += f"\n📈 P/L: {profit} $ ({round(profit_percent,2)} %)"
+
+        if balance_before is not None and balance_after is not None:
+            message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
 
         if reason:
             message += f"\n📉 Reason: {reason}"
