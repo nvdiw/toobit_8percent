@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from indicators import Indicator
 from telegram_bot import TelegramNotifier
 from database import Database
+from rammonitor import RamMonitor
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
@@ -202,8 +203,14 @@ def wait_for_next_quarter():
             return
         time.sleep(0.3)
 
+# you can turn on to see bot ram usage:  ----> True/False
+# ================= RAM MONITOR =================
+ram_monitor = False
+if ram_monitor == True:
+    ram_monitor = RamMonitor(interval=2, warn_mb=500)
+    ram_monitor.start()
 
-# main 
+# MAIN LOOP 
 while True:
     wait_for_next_quarter()
     ma_strategy()
