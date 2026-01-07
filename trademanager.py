@@ -4,11 +4,19 @@ def trade_duration(open_time: str, close_time: str):
 
     def parse(t):
         t = t.strip()
+
+        # remove timezone if exists
+        if "+" in t:
+            t = t.split("+")[0]
+
         date, time = t.split(" ")
         y, m, d = map(int, date.split("-"))
+
         h, mi, s = time.split(":")
-        s = int(float(s))  # drop microseconds
+        s = int(float(s))  # drop microseconds if any
+
         return y, m, d, int(h), int(mi), s
+
 
     def to_seconds(y, m, d, h, mi, s):
         # days per month (no leap year handling for simplicity)
