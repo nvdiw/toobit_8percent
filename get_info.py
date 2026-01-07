@@ -1,6 +1,9 @@
 import requests
 import time
+import argparse
 from datetime import datetime, timezone
+
+# My Files
 from indicators import Indicator
 from telegram_bot import TelegramNotifier
 from database import Database
@@ -12,6 +15,55 @@ VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
 BOT_TOKEN = "TOKEN"
 CHAT_ID = int("CHAT_ID")
+
+# ---- settings is here ----
+balance = 1000
+leverage = 5
+trade_amount_percent = 0.5  # 50% of balance per trade
+monthly_profit_percent_stop_trade = 8    # if 8% per month profit --> don't trade on that month 
+monthly_compound = 3    # after get 'monthly_profit_percent_stop_trade' per month how much money goes for next month
+monthly_close_filter = True
+adx_filter = True
+volume_filter = True
+
+ma_distance_threshold = 0.00204  # 0.2٪
+candle_move_threshold = 0.0082 # 0.8٪
+
+cooldown_after_big_pnl = 4 * 46  # 4 * 48  # 4 * x   [x] ---> number of candles per hour
+cooldown_until_index = -1
+
+# fee rate
+fee_rate = 0.0005  # 0.05% per trade (entry or exit)
+
+save_money = 0
+total_wins = 0
+total_wins_long = 0
+total_wins_short = 0
+total_losses = 0
+total_long = 0
+total_short = 0
+total_profit_percent = 0
+deducting_fee_total = 0
+count_closed_orders = 0
+profit_percent_per_month = 0
+lst_profit_percent_per_month = []
+# lists / trackers
+profits_lst = []
+equity_curve = []
+max_drawdown = 0
+
+entry_price = None
+position_size = None
+position_size_no_fee = None
+balance_before_trade = None
+balance_before_trade_no_fee = None
+open_time_value = None
+
+trade_power = True
+
+balance_without_fee = balance
+first_balance = balance
+tactical_balance = first_balance
 
 current_position = None  # None | "long" | "short"
 
@@ -45,9 +97,12 @@ def get_ohlcv(
 
 # Main Trading Logic
 def ma_strategy():
-    global current_position
+    global balance, balance_without_fee, current_position, margin, trade_power, cooldown_until_index, leverage, position_size_no_fee, margin_no_fee, balance_before_trade, balance_before_trade_no_fee, deducting_fee_total, profits_lst, total_profit_percent, count_closed_orders, equity_curve, max_drawdown, total_wins, total_wins_short, total_losses, total_short, profit_percent_per_month, save_money
 
     csv_logger = TradeCSVLogger()
+
+    # send message to telegram
+    signal_message = TelegramNotifier(bot_token=BOT_TOKEN, chat_id = CHAT_ID)
 
     open_times = []
     open_prices = []
@@ -56,60 +111,13 @@ def ma_strategy():
     close_prices = []
     volume_prices = []
     close_times = []
-    
-    # ---- settings is here ----
-    balance = 1000
-    leverage = 5
-    trade_amount_percent = 0.5  # 50% of balance per trade
-    monthly_profit_percent_stop_trade = 8    # if 8% per month profit --> don't trade on that month 
-    monthly_compound = 3    # after get 'monthly_profit_percent_stop_trade' per month how much money goes for next month
-    monthly_close_filter = True
-    adx_filter = True
-    volume_filter = True
-
-    ma_distance_threshold = 0.00204  # 0.2٪
-    candle_move_threshold = 0.0082 # 0.8٪
-
-    cooldown_after_big_pnl = 4 * 46  # 4 * 48  # 4 * x   [x] ---> number of candles per hour
-    cooldown_until_index = -1
-
-    # fee rate
-    fee_rate = 0.0005  # 0.05% per trade (entry or exit)
-
-    save_money = 0
-    total_wins = 0
-    total_wins_long = 0
-    total_wins_short = 0
-    total_losses = 0
-    total_long = 0
-    total_short = 0
-    total_profit_percent = 0
-    deducting_fee_total = 0
-    count_closed_orders = 0
-    profit_percent_per_month = 0
-    lst_profit_percent_per_month = []
-    # lists / trackers
-    profits_lst = []
-    equity_curve = []
-    max_drawdown = 0
-
-    entry_price = None
-    position_size = None
-    position_size_no_fee = None
-    balance_before_trade = None
-    balance_before_trade_no_fee = None
-    open_time_value = None
-
-    trade_power = True
-
-    balance_without_fee = balance
-    first_balance = balance
-    tactical_balance = first_balance
-
-    signal_message = TelegramNotifier(bot_token=BOT_TOKEN, chat_id = CHAT_ID)
-
+    margin_no_fee = 500
+    balance_before_trade = 1000
+    balance_before_trade_no_fee = 1000
+    position_size_no_fee = 0.1
+    # get data from binance
     data = (get_ohlcv(symbol= "BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
-
+    # Fetch OHLCV data from Binance and normalize candle timestamps (UTC) 
     for i in range(len(data) - 1):
         open_times.append(str(datetime.fromtimestamp(data[i][0] / 1000, tz=timezone.utc)))
         open_prices.append(float(data[i][1]))
@@ -117,7 +125,7 @@ def ma_strategy():
         low_prices.append(float(data[i][3]))
         close_prices.append(float(data[i][4]))
         volume_prices.append(float(data[i][5]))
-        close_times.append(str(datetime.fromtimestamp((data[i][6] / 1000) + 1, tz=timezone.utc)))
+        close_times.append(str(datetime.fromtimestamp((data[i][6] / 1000) + 0.001, tz=timezone.utc)))
 
     # move data to database.db
     db = Database(db_name="database.db")
@@ -143,6 +151,21 @@ def ma_strategy():
         margin = open_order['margin']
         leverage = open_order['leverage']
         open_time_value = open_order['open_time']
+        # restore balance/fee related values if present
+        if open_order.get('balance') is not None:
+            balance = open_order.get('balance')
+        if open_order.get('balance_without_fee') is not None:
+            balance_without_fee = open_order.get('balance_without_fee')
+        if open_order.get('balance_before_trade') is not None:
+            balance_before_trade = open_order.get('balance_before_trade')
+        if open_order.get('balance_before_trade_no_fee') is not None:
+            balance_before_trade_no_fee = open_order.get('balance_before_trade_no_fee')
+        if open_order.get('margin_no_fee') is not None:
+            margin_no_fee = open_order.get('margin_no_fee')
+        if open_order.get('position_size_no_fee') is not None:
+            position_size_no_fee = open_order.get('position_size_no_fee')
+        if open_order.get('current_position') is not None:
+            current_position = open_order.get('current_position')
         print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (size={position_size}, margin={margin}, lev={leverage})")
     
     # ---- get MA/EMA ----
@@ -267,7 +290,14 @@ def ma_strategy():
                 position_size=position_size,
                 margin=margin,
                 leverage=leverage,
-                status="open"
+                status="open",
+                balance=balance,
+                balance_without_fee=balance_without_fee,
+                balance_before_trade=balance_before_trade,
+                balance_before_trade_no_fee=balance_before_trade_no_fee,
+                margin_no_fee=margin_no_fee,
+                position_size_no_fee=position_size_no_fee,
+                current_position=current_position
             )
 
             # terminal + telegram notification with details
@@ -412,7 +442,14 @@ def ma_strategy():
                 position_size=position_size,
                 margin=margin,
                 leverage=leverage,
-                status="open"
+                status="open",
+                balance=balance,
+                balance_without_fee=balance_without_fee,
+                balance_before_trade=balance_before_trade,
+                balance_before_trade_no_fee=balance_before_trade_no_fee,
+                margin_no_fee=margin_no_fee,
+                position_size_no_fee=position_size_no_fee,
+                current_position=current_position
             )
 
             print(f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}")
@@ -484,10 +521,10 @@ def ma_strategy():
             if order_id is not None:
                 try:
                     db.update_order_close(order_id=order_id,
-                                          close_price=close_prices[-1],
-                                          close_time=close_times[-1],
-                                          profit=profit,
-                                          profit_percent=profit_percent)
+                                            close_price=close_prices[-1],
+                                            close_time=close_times[-1],
+                                            profit=profit,
+                                            profit_percent=profit_percent)
                 except Exception as e:
                     print("DB update_order_close failed:", e)
 
@@ -506,10 +543,17 @@ def wait_for_next_quarter():
             return
         time.sleep(0.3)
 
+parser = argparse.ArgumentParser(description="Trading bot")
+parser.add_argument(
+    "--rammonitor",
+    action="store_true",
+    help="Enable RAM monitor"
+)
+args = parser.parse_args()
+
 # you can turn on to see bot ram usage:  ----> True/False
 # ================= RAM MONITOR =================
-ram_monitor = False
-if ram_monitor == True:
+if args.rammonitor:
     ram_monitor = RamMonitor(interval=2, warn_mb=500)
     ram_monitor.start()
 
