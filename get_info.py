@@ -97,7 +97,7 @@ def get_ohlcv(
 
 # Main Trading Logic
 def ma_strategy():
-    global balance, balance_without_fee, current_position, margin, trade_power, cooldown_until_index, leverage, position_size_no_fee, margin_no_fee, balance_before_trade, balance_before_trade_no_fee, deducting_fee_total, profits_lst, total_profit_percent, count_closed_orders, equity_curve, max_drawdown, total_wins, total_wins_short, total_losses, total_short, profit_percent_per_month, save_money
+    global balance, balance_without_fee, current_position, margin, trade_power, cooldown_until_index, leverage, position_size_no_fee, margin_no_fee, balance_before_trade, balance_before_trade_no_fee, deducting_fee_total, profits_lst, total_profit_percent, count_closed_orders, equity_curve, max_drawdown, total_wins, total_wins_long, total_wins_short, total_losses, total_long, total_short, profit_percent_per_month, save_money
 
     csv_logger = TradeCSVLogger()
 
@@ -111,10 +111,7 @@ def ma_strategy():
     close_prices = []
     volume_prices = []
     close_times = []
-    margin_no_fee = 500
-    balance_before_trade = 1000
-    balance_before_trade_no_fee = 1000
-    position_size_no_fee = 0.1
+
     # get data from binance
     data = (get_ohlcv(symbol= "BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
     # Fetch OHLCV data from Binance and normalize candle timestamps (UTC) 
@@ -151,21 +148,6 @@ def ma_strategy():
         margin = open_order['margin']
         leverage = open_order['leverage']
         open_time_value = open_order['open_time']
-        # restore balance/fee related values if present
-        if open_order.get('balance') is not None:
-            balance = open_order.get('balance')
-        if open_order.get('balance_without_fee') is not None:
-            balance_without_fee = open_order.get('balance_without_fee')
-        if open_order.get('balance_before_trade') is not None:
-            balance_before_trade = open_order.get('balance_before_trade')
-        if open_order.get('balance_before_trade_no_fee') is not None:
-            balance_before_trade_no_fee = open_order.get('balance_before_trade_no_fee')
-        if open_order.get('margin_no_fee') is not None:
-            margin_no_fee = open_order.get('margin_no_fee')
-        if open_order.get('position_size_no_fee') is not None:
-            position_size_no_fee = open_order.get('position_size_no_fee')
-        if open_order.get('current_position') is not None:
-            current_position = open_order.get('current_position')
         print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (size={position_size}, margin={margin}, lev={leverage})")
     
     # ---- get MA/EMA ----
@@ -274,9 +256,11 @@ def ma_strategy():
             balance_before_trade_no_fee = updates['balance_before_trade_no_fee']
             margin = updates['margin']
             leverage = updates['leverage']
+            position_value = updates['position_value']
             position_size = updates['position_size']
             margin_no_fee = updates['margin_no_fee']
             position_size_no_fee = updates['position_size_no_fee']
+            position_value_no_fee = updates['position_value_no_fee']
             open_time_value = updates['open_time_value']
             current_position = updates['current_position']
             updates = None
@@ -290,14 +274,7 @@ def ma_strategy():
                 position_size=position_size,
                 margin=margin,
                 leverage=leverage,
-                status="open",
-                balance=balance,
-                balance_without_fee=balance_without_fee,
-                balance_before_trade=balance_before_trade,
-                balance_before_trade_no_fee=balance_before_trade_no_fee,
-                margin_no_fee=margin_no_fee,
-                position_size_no_fee=position_size_no_fee,
-                current_position=current_position
+                status="open"
             )
 
             # terminal + telegram notification with details
@@ -406,8 +383,7 @@ def ma_strategy():
                 if not (volume_pass and strong_candle):
                     return
     
-            # ---- open order ----
-            # open order
+            # ---- open SHORT ----
             updates = trade_manager.open_short(
                 close_prices[-1],
                 close_times[-1],
@@ -426,9 +402,11 @@ def ma_strategy():
             balance_before_trade_no_fee = updates['balance_before_trade_no_fee']
             margin = updates['margin']
             leverage = updates['leverage']
+            position_value = updates['position_value']
             position_size = updates['position_size']
             margin_no_fee = updates['margin_no_fee']
             position_size_no_fee = updates['position_size_no_fee']
+            position_value_no_fee = updates['position_value_no_fee']
             open_time_value = updates['open_time_value']
             current_position = updates['current_position']
             updates = None
@@ -442,14 +420,7 @@ def ma_strategy():
                 position_size=position_size,
                 margin=margin,
                 leverage=leverage,
-                status="open",
-                balance=balance,
-                balance_without_fee=balance_without_fee,
-                balance_before_trade=balance_before_trade,
-                balance_before_trade_no_fee=balance_before_trade_no_fee,
-                margin_no_fee=margin_no_fee,
-                position_size_no_fee=position_size_no_fee,
-                current_position=current_position
+                status="open"
             )
 
             print(f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}")
