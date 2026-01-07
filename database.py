@@ -50,11 +50,21 @@ class Database:
             leverage INTEGER,
             profit REAL,
             profit_percent REAL,
-            status TEXT
+            status TEXT,
+            balance REAL,
+            balance_without_fee REAL,
+            balance_before_trade REAL,
+            balance_before_trade_no_fee REAL,
+            margin_no_fee REAL,
+            position_size_no_fee REAL,
+            current_position TEXT
         )
         """)
 
         self.conn.commit()
+
+        # ensure any missing columns are added for older DBs
+        self._ensure_order_columns()
 
     # ---------- INSERT METHODS ----------
 
@@ -77,10 +87,18 @@ class Database:
 
     # ---------- ORDER METHODS ----------
     def insert_order(self, symbol, side, entry_price, open_time, position_size, margin, leverage, status="open"):
+        # extended insert supporting additional balance and fee-related fields
         self.cursor.execute("""
-        INSERT INTO orders (symbol, side, entry_price, open_time, position_size, margin, leverage, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (symbol, side, entry_price, open_time, position_size, margin, leverage, status))
+        INSERT INTO orders (
+            symbol, side, entry_price, open_time, position_size, margin, leverage, status,
+            balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
+            margin_no_fee, position_size_no_fee, current_position
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            symbol, side, entry_price, open_time, position_size, margin, leverage, status,
+            None, None, None, None, None, None, None
+        ))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -94,7 +112,9 @@ class Database:
 
     def get_open_order(self):
         self.cursor.execute("""
-        SELECT id, symbol, side, entry_price, open_time, position_size, margin, leverage
+        SELECT id, symbol, side, entry_price, open_time, position_size, margin, leverage,
+               balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
+               margin_no_fee, position_size_no_fee, current_position
         FROM orders
         WHERE status = 'open'
         ORDER BY id DESC
@@ -111,5 +131,33 @@ class Database:
             'open_time': row[4],
             'position_size': row[5],
             'margin': row[6],
-            'leverage': row[7]
+            'leverage': row[7],
+            'balance': row[8],
+            'balance_without_fee': row[9],
+            'balance_before_trade': row[10],
+            'balance_before_trade_no_fee': row[11],
+            'margin_no_fee': row[12],
+            'position_size_no_fee': row[13],
+            'current_position': row[14]
         }
+
+    def _ensure_order_columns(self):
+        # Check existing columns and add missing ones (for existing DBs)
+        self.cursor.execute("PRAGMA table_info('orders')")
+        cols = {r[1] for r in self.cursor.fetchall()}
+        additions = {
+            'balance': 'REAL',
+            'balance_without_fee': 'REAL',
+            'balance_before_trade': 'REAL',
+            'balance_before_trade_no_fee': 'REAL',
+            'margin_no_fee': 'REAL',
+            'position_size_no_fee': 'REAL',
+            'current_position': 'TEXT'
+        }
+        for col, col_type in additions.items():
+            if col not in cols:
+                try:
+                    self.cursor.execute(f"ALTER TABLE orders ADD COLUMN {col} {col_type}")
+                    self.conn.commit()
+                except Exception:
+                    pass
