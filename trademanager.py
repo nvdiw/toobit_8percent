@@ -238,8 +238,11 @@ class TradeManager:
             'current_position': current_position,
             'trade_power': trade_power,
             'profit_percent_per_month': profit_percent_per_month,
-            'save_money' : save_money
-            , 'profit': profit, 'profit_percent': profit_percent
+            'save_money' : save_money,
+            'profit': profit,
+            'profit_percent': profit_percent,
+            'margin': margin,
+            'margin_no_fee': margin_no_fee
         }
     
 
@@ -431,6 +434,9 @@ class TradeManager:
             'current_position': current_position,
             'trade_power': trade_power,
             'profit_percent_per_month': profit_percent_per_month,
-            'save_money' : save_money
-            , 'profit': profit, 'profit_percent': profit_percent
+            'save_money' : save_money,
+            'profit': profit,
+            'profit_percent': profit_percent,
+            'margin': margin,
+            'margin_no_fee': margin_no_fee
         }
