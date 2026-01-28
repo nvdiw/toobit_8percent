@@ -126,7 +126,7 @@ def ma_strategy():
 
     # move data to database.db
     db = Database(db_name="database.db")
-    print("inserting data to database.db")
+    print(f"inserting data to database.db at {close_times[-1]}")
     db.insert_data(symbol= "BTCUSDT",
                    open_times= open_times[-1],
                    open_prices= open_prices[-1],
@@ -166,6 +166,8 @@ def ma_strategy():
 
         print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (size={position_size}, margin={margin}, lev={leverage})")
     
+    balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
+
     # ---- get MA/EMA ----
     indicator = Indicator(close_prices, period=None)
     ema_14 = indicator.get_EMA(14)[-1]
@@ -241,16 +243,10 @@ def ma_strategy():
                 vol_now = volume_prices[-1]
                 vol_avg15 = indicator.get_avg_volume_last(volume_prices, window=15)
 
-                # ---- Strong Candle ----
-                body = abs(close_prices[-1] - open_prices[-1])
-                range_ = high_prices[-1] - low_prices[-1]
-
-                strong_candle = range_ > 0 and body >= 0.6 * range_
-
                 # ---- Volume Condition ----
                 volume_pass = vol_now >= 1.2 * vol_avg15
 
-                if not (volume_pass and strong_candle):
+                if not volume_pass:
                     return
 
             # ---- open order ----
@@ -280,7 +276,7 @@ def ma_strategy():
             updates = None
 
             # persist open order to DB
-            order_id = db.insert_order(
+            order_id = db.insert_open_order(
                 symbol="BTCUSDT",
                 side="long",
                 entry_price=entry_price,
@@ -342,6 +338,8 @@ def ma_strategy():
 
             balance = updates['balance']
             balance_without_fee = updates['balance_without_fee']
+            margin = updates['margin']
+            margin_no_fee = updates['margin_no_fee']
             deducting_fee_total = updates['deducting_fee_total']
             profits_lst = updates['profits_lst']
             total_profit_percent = updates['total_profit_percent']
@@ -369,7 +367,11 @@ def ma_strategy():
                                           close_price=close_prices[-1],
                                           close_time=close_times[-1],
                                           profit=profit,
-                                          profit_percent=profit_percent)
+                                          profit_percent=profit_percent,
+                                          balance=balance,
+                                          balance_without_fee=balance_without_fee,
+                                          margin=margin,
+                                          margin_no_fee=margin_no_fee)
                 except Exception as e:
                     print("DB update_order_close failed:", e)
 
@@ -392,16 +394,10 @@ def ma_strategy():
                 vol_now = volume_prices[-1]
                 vol_avg15 = indicator.get_avg_volume_last(volume_prices, window=15)
 
-                # ---- Strong Candle ----
-                body = abs(close_prices[-1] - open_prices[-1])
-                range_ = high_prices[-1] - low_prices[-1]
-
-                strong_candle = range_ > 0 and body >= 0.6 * range_
-
                 # ---- Volume Condition ----
                 volume_pass = vol_now >= 1.2 * vol_avg15
 
-                if not (volume_pass and strong_candle):
+                if not volume_pass:
                     return
     
             # ---- open SHORT ----
@@ -431,7 +427,7 @@ def ma_strategy():
             updates = None
 
             # persist open order to DB
-            order_id = db.insert_order(
+            order_id = db.insert_open_order(
                 symbol="BTCUSDT",
                 side="short",
                 entry_price=entry_price,
@@ -494,6 +490,8 @@ def ma_strategy():
 
             balance = updates['balance']
             balance_without_fee = updates['balance_without_fee']
+            margin = updates['margin']
+            margin_no_fee = updates['margin_no_fee']
             deducting_fee_total = updates['deducting_fee_total']
             profits_lst = updates['profits_lst']
             total_profit_percent = updates['total_profit_percent']
@@ -518,10 +516,14 @@ def ma_strategy():
             if order_id is not None:
                 try:
                     db.update_order_close(order_id=order_id,
-                                            close_price=close_prices[-1],
-                                            close_time=close_times[-1],
-                                            profit=profit,
-                                            profit_percent=profit_percent)
+                                          close_price=close_prices[-1],
+                                          close_time=close_times[-1],
+                                          profit=profit,
+                                          profit_percent=profit_percent,
+                                          balance=balance,
+                                          balance_without_fee=balance_without_fee,
+                                          margin=margin,
+                                          margin_no_fee=margin_no_fee)
                 except Exception as e:
                     print("DB update_order_close failed:", e)
 
