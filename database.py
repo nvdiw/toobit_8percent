@@ -86,7 +86,7 @@ class Database:
         self.conn.close()
 
     # ---------- ORDER METHODS ----------
-    def insert_order(self, symbol, side, entry_price, open_time, position_size, margin, leverage, status="open",
+    def insert_open_order(self, symbol, side, entry_price, open_time, position_size, margin, leverage, status="open",
                      balance=None, balance_without_fee=None, balance_before_trade=None, balance_before_trade_no_fee=None,
                      margin_no_fee=None, position_size_no_fee=None, current_position=None):
         # extended insert supporting additional balance and fee-related fields
@@ -105,12 +105,15 @@ class Database:
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def update_order_close(self, order_id, close_price, close_time, profit, profit_percent, status="closed"):
+    def update_order_close(self, order_id, close_price, close_time, profit, profit_percent, balance,
+                            balance_without_fee, margin, margin_no_fee, status="closed"):
         self.cursor.execute("""
         UPDATE orders
-        SET close_price = ?, close_time = ?, profit = ?, profit_percent = ?, status = ?
+        SET close_price = ?, close_time = ?, profit = ?, profit_percent = ?, status = ?, balance = ?,
+                            balance_without_fee = ?, margin = ?, margin_no_fee = ?
         WHERE id = ?
-        """, (close_price, close_time, profit, profit_percent, status, order_id))
+        """, (close_price, close_time, profit, profit_percent, status, balance,
+                            balance_without_fee, margin, margin_no_fee, order_id))
         self.conn.commit()
 
     def get_open_order(self):
@@ -143,6 +146,31 @@ class Database:
             'position_size_no_fee': row[13],
             'current_position': row[14]
         }
+
+    def get_current_balances(self, initial_balance=1000):
+        """
+        Get latest balance and balance_without_fee from last order (any status).
+        If no order exists or balances are NULL, return initial balance.
+        """
+
+        self.cursor.execute("""
+            SELECT balance, balance_without_fee
+            FROM orders
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+
+        row = self.cursor.fetchone()
+
+        if row and row[0] is not None:
+            balance = row[0]
+            balance_without_fee = row[1] if row[1] is not None else row[0]
+        else:
+            balance = initial_balance
+            balance_without_fee = initial_balance
+
+        return balance, balance_without_fee
+
 
     def _ensure_order_columns(self):
         # Check existing columns and add missing ones (for existing DBs)
