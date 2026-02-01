@@ -43,7 +43,7 @@ class TelegramNotifier:
         )
 
         if profit is not None and profit_percent is not None:
-            message += f"\n📈 P/L: {profit} $ ({round(profit_percent,2)} %)"
+            message += f"\n📈 P/L: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
 
         if balance_before is not None and balance_after is not None:
             message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
@@ -95,7 +95,7 @@ class TelegramNotifier:
         )
 
         if profit is not None and profit_percent is not None:
-            message += f"\n📈 P/L: {profit} $ ({round(profit_percent,2)} %)"
+            message += f"\n📈 P/L: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
 
         if balance_before is not None and balance_after is not None:
             message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
