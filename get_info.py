@@ -88,12 +88,15 @@ def get_ohlcv(
         "limit": limit
     }
     print("📊 Fetching OHLCV data...")
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    data = response.json()
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
 
-    return data
-
+        return data
+    
+    except Exception as e:
+        print("Fetching OHLCV Error")
 
 # Main Trading Logic
 def ma_strategy():
@@ -164,7 +167,7 @@ def ma_strategy():
         if open_order.get('current_position') is not None:
             current_position = open_order.get('current_position')
 
-        print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (size={position_size}, margin={margin}, lev={leverage})")
+        print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (time={close_prices}, margin={margin}, lev={leverage})")
     
     balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
 
@@ -193,7 +196,8 @@ def ma_strategy():
     # Calculate Distance New Candle Move and Last Candle Move
     last_candle_move = abs(close_prices[-1] - close_prices[-2]) / close_prices[-2]
 
-    total_balance = balance + (margin if current_position is not None else 0)
+    margin_balance = balance + (margin if current_position is not None else 0)
+    total_balance = balance + (margin if current_position is not None else 0) + save_money
 
     # ---- Monthly close filter: if trading is disabled (trade_power==False)
     # detect month boundaries from `close_times` and re-enable trading
@@ -257,7 +261,7 @@ def ma_strategy():
                 balance_without_fee,
                 first_balance,
                 trade_amount_percent,
-                total_balance,
+                margin_balance,
                 leverage)
             
 
@@ -376,7 +380,7 @@ def ma_strategy():
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: LONG closed @ {close_prices[-1]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_long(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=balance)
+            signal_message.send_close_long(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=total_balance)
 
 
     # ===================== OPEN SHORT =====================
@@ -408,7 +412,7 @@ def ma_strategy():
                 balance_without_fee,
                 first_balance,
                 trade_amount_percent,
-                total_balance,
+                margin_balance,
                 leverage)
             
 
@@ -528,7 +532,7 @@ def ma_strategy():
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: SHORT closed @ {close_prices[-1]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_short(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=balance)
+            signal_message.send_close_short(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=total_balance)
 
 
 # wait on 0, 15, 30, 45 minutes for get data
