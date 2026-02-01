@@ -31,7 +31,8 @@ class TelegramNotifier:
         requests.post(self.base_url, data=payload)
 
 
-    def send_close_long(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, balance_before=None, balance_after=None, pnl_percent=None):
+    def send_close_long(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, pnl=None, pnl_percent=None, 
+                        balance_before=None, balance_after=None, margin=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -42,8 +43,16 @@ class TelegramNotifier:
             f"📊 Symbol: {symbol}"
         )
 
+        if pnl is not None and pnl_percent is not None:
+            message += f"\n📈 P/L: {round(pnl, 2)} $ | ({round(pnl_percent,2)} %)"
+
+        if margin is not None:
+            message += f"\n📈 Amount: {round(margin, 2)} $ in position"
+
         if profit is not None and profit_percent is not None:
-            message += f"\n📈 P/L: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
+            message += "\n"
+            message += "\n total Portfolio (Calculating fees)"
+            message += f"\n📈 Profit: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
 
         if balance_before is not None and balance_after is not None:
             message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
@@ -83,7 +92,8 @@ class TelegramNotifier:
         requests.post(self.base_url, data=payload)
 
 
-    def send_close_short(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, balance_before=None, balance_after=None, pnl_percent=None):
+    def send_close_short(self, price, time_str, symbol=None, reason=None, profit=None, profit_percent=None, pnl=None, pnl_percent=None, 
+                         balance_before=None, balance_after=None, margin=None):
         if symbol is None:
             symbol = self.default_symbol
 
@@ -94,8 +104,16 @@ class TelegramNotifier:
             f"📊 Symbol: {symbol}"
         )
 
+        if pnl is not None and pnl_percent is not None:
+            message += f"\n📈 P/L: {round(pnl, 2)} $ | ({round(pnl_percent,2)} %)"
+
+        if margin is not None:
+            message += f"\n📈 Amount: {round(margin, 2)} $ in position"
+
         if profit is not None and profit_percent is not None:
-            message += f"\n📈 P/L: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
+            message += "\n"
+            message += "\n total Portfolio (Calculating fees)"
+            message += f"\n📈 Profit: {round(profit, 2)} $ | ({round(profit_percent,2)} %)"
 
         if balance_before is not None and balance_after is not None:
             message += f"\n💵 Balance: {round(balance_before,2)} $ → {round(balance_after,2)} $"
