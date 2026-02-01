@@ -22,14 +22,14 @@ leverage = 5
 trade_amount_percent = 0.5  # 50% of balance per trade
 monthly_profit_percent_stop_trade = 8    # if 8% per month profit --> don't trade on that month 
 monthly_compound = 3    # after get 'monthly_profit_percent_stop_trade' per month how much money goes for next month
-monthly_close_filter = True
+monthly_close_filter = False
 adx_filter = True
 volume_filter = True
 
 ma_distance_threshold = 0.00204  # 0.2٪
 candle_move_threshold = 0.0082 # 0.8٪
 
-cooldown_after_big_pnl = 4 * 46  # 4 * 48  # 4 * x   [x] ---> number of candles per hour
+cooldown_after_big_pnl = 4 * 24  # 4 * 48  # 4 * x   [x] ---> number of candles per hour
 cooldown_until_index = -1
 
 # fee rate
@@ -96,7 +96,9 @@ def get_ohlcv(
         return data
     
     except Exception as e:
-        print("Fetching OHLCV Error")
+        # more helpful debug message and explicit None return for callers to handle
+        print("Fetching OHLCV Error:", repr(e))
+        return None
 
 # Main Trading Logic
 def ma_strategy():
@@ -116,8 +118,32 @@ def ma_strategy():
     close_times = []
 
     # get data from binance
-    data = (get_ohlcv(symbol= "BTCUSDT", interval= "15m", limit= 201))  # BTCUSDT by default
-    # Fetch OHLCV data from Binance and normalize candle timestamps (UTC) 
+    required_candles = 201
+    data = get_ohlcv(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
+
+    # If fetch failed (e.g. transient network), retry for a short grace period so the bot doesn't exit
+    if not data or len(data) < 2:
+        start_ts = time.time()
+        grace = 60  # seconds to tolerate transient outage
+        retry_interval = 5
+        print(f"⚠️ No OHLCV received — retrying for up to {grace}s (interval={retry_interval}s)...")
+        while time.time() - start_ts < grace:
+            time.sleep(retry_interval)
+            data = get_ohlcv(symbol="BTCUSDT", interval="15m", limit=required_candles)
+            if data and len(data) >= 2:
+                print("✅ OHLCV recovered")
+                break
+            print(".", end="", flush=True)
+        else:
+            # grace period expired — do NOT crash; skip this cycle and remain running
+            print("\n⚠️ Still no OHLCV after grace period — skipping this cycle but staying alive.")
+            return
+
+    # validate we have enough candles for indicators (warn but continue with available data)
+    if len(data) < required_candles:
+        print(f"⚠️ Warning: fetched {len(data)} candles (expected {required_candles}); continuing with available data.")
+
+    # Fetch OHLCV data from Binance and normalize candle timestamps (UTC)
     for i in range(len(data) - 1):
         open_times.append(str(datetime.fromtimestamp(data[i][0] / 1000, tz=timezone.utc)))
         open_prices.append(float(data[i][1]))
@@ -362,6 +388,8 @@ def ma_strategy():
             # capture profit info before clearing updates
             profit = updates.get('profit')
             profit_percent = updates.get('profit_percent')
+            pnl = updates.get('pnl')
+            pnl_percent = updates.get('pnl_percent')
             updates = None
 
             # update DB for this order
@@ -380,7 +408,8 @@ def ma_strategy():
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: LONG closed @ {close_prices[-1]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_long(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=total_balance)
+            signal_message.send_close_long(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, pnl=pnl, pnl_percent=pnl_percent, 
+                                           balance_before=balance_before_trade, balance_after=total_balance, margin=margin)
 
 
     # ===================== OPEN SHORT =====================
@@ -514,6 +543,8 @@ def ma_strategy():
             # capture profit info before clearing updates
             profit = updates.get('profit')
             profit_percent = updates.get('profit_percent')
+            pnl = updates.get('pnl')
+            pnl_percent = updates.get('pnl_percent')
             updates = None
 
             # update DB for this order
@@ -532,7 +563,8 @@ def ma_strategy():
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: SHORT closed @ {close_prices[-1]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_short(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, balance_before=balance_before_trade, balance_after=total_balance)
+            signal_message.send_close_short(price= close_prices[-1], time_str= close_times[-1], profit=profit, profit_percent=profit_percent, pnl=pnl, pnl_percent=pnl_percent, 
+                                            balance_before=balance_before_trade, balance_after=total_balance, margin=margin)
 
 
 # wait on 0, 15, 30, 45 minutes for get data
