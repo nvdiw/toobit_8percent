@@ -241,6 +241,8 @@ class TradeManager:
             'save_money' : save_money,
             'profit': profit,
             'profit_percent': profit_percent,
+            'pnl': pnl,
+            'pnl_percent': pnl_percent,
             'margin': margin,
             'margin_no_fee': margin_no_fee
         }
@@ -437,6 +439,8 @@ class TradeManager:
             'save_money' : save_money,
             'profit': profit,
             'profit_percent': profit_percent,
+            'pnl': pnl,
+            'pnl_percent': pnl_percent,
             'margin': margin,
             'margin_no_fee': margin_no_fee
         }
