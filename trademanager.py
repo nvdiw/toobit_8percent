@@ -53,7 +53,7 @@ class TradeManager:
     # open long processes
     def open_long(self, open_prices, open_times,
                     balance, balance_without_fee, first_balance,
-                    trade_amount_percent, total_balance, leverage):
+                    trade_amount_percent, margin_balance, leverage):
 
         entry_price = open_prices
 
@@ -67,7 +67,7 @@ class TradeManager:
             margin = balance * trade_amount_percent
         
         # ---------- Leverage ----------
-        if total_balance <= self.tactical_balance * 90 / 100:
+        if margin_balance <= self.tactical_balance * 90 / 100:
             leverage = 3
         else:
             leverage = 5
@@ -249,7 +249,7 @@ class TradeManager:
     # open short processes
     def open_short(self, open_prices, open_times,
                     balance, balance_without_fee, first_balance,
-                    trade_amount_percent, total_balance, leverage):
+                    trade_amount_percent, margin_balance, leverage):
 
         entry_price = open_prices
 
@@ -263,7 +263,7 @@ class TradeManager:
             margin = balance * trade_amount_percent
 
         # ---------- Leverage ----------
-        if total_balance <= self.tactical_balance * 90 / 100:
+        if margin_balance <= self.tactical_balance * 90 / 100:
             leverage = 3
         else:
             leverage = 5
