@@ -193,7 +193,7 @@ def ma_strategy():
         if open_order.get('current_position') is not None:
             current_position = open_order.get('current_position')
 
-        print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (time={close_prices}, margin={margin}, lev={leverage})")
+        print(f"Restored open order #{order_id}: {current_position} @ {entry_price} (time={open_time_value}, margin={margin}, lev={leverage})")
     
     balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
 
@@ -223,7 +223,6 @@ def ma_strategy():
     last_candle_move = abs(close_prices[-1] - close_prices[-2]) / close_prices[-2]
 
     margin_balance = balance + (margin if current_position is not None else 0)
-    total_balance = balance + (margin if current_position is not None else 0) + save_money
 
     # ---- Monthly close filter: if trading is disabled (trade_power==False)
     # detect month boundaries from `close_times` and re-enable trading
@@ -391,7 +390,8 @@ def ma_strategy():
             pnl = updates.get('pnl')
             pnl_percent = updates.get('pnl_percent')
             updates = None
-
+            total_balance = balance + (margin if current_position is not None else 0) + save_money
+            
             # update DB for this order
             if order_id is not None:
                 try:
@@ -546,7 +546,8 @@ def ma_strategy():
             pnl = updates.get('pnl')
             pnl_percent = updates.get('pnl_percent')
             updates = None
-
+            total_balance = balance + (margin if current_position is not None else 0) + save_money
+            
             # update DB for this order
             if order_id is not None:
                 try:
@@ -579,11 +580,19 @@ def wait_for_next_quarter():
         time.sleep(0.3)
 
 parser = argparse.ArgumentParser(description="Trading bot")
+
 parser.add_argument(
     "--rammonitor",
     action="store_true",
     help="Enable RAM monitor"
 )
+
+parser.add_argument(
+    "--test",
+    action="store_true",
+    help="Enable a test Bot with out using time filter"
+)
+
 args = parser.parse_args()
 
 # you can turn on to see bot ram usage:  ----> True/False
@@ -594,7 +603,12 @@ if args.rammonitor:
 
 # MAIN LOOP 
 while True:
-    wait_for_next_quarter()
-    ma_strategy()
+    if args.test:
+        ma_strategy()
+        break
+
+    else:
+        wait_for_next_quarter()
+        ma_strategy()
 
     time.sleep(FETCH_WINDOW_SECONDS + 1)
