@@ -63,6 +63,34 @@ class Database:
 
         self.conn.commit()
 
+        # balance state table (persist first/tactical balances across restarts)
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS balance_state (
+            mode TEXT PRIMARY KEY,
+            first_balance REAL,
+            tactical_balance REAL,
+            locked INTEGER,
+            updated_at TEXT
+        )
+        """)
+
+        self.conn.commit()
+
+        # runtime state table (persist strategy state across restarts)
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS runtime_state (
+            mode TEXT PRIMARY KEY,
+            last_trade_cross_time TEXT,
+            skip_trades_left INTEGER,
+            consecutive_losses INTEGER,
+            trade_power INTEGER,
+            trade_power_locked_month TEXT,
+            updated_at TEXT
+        )
+        """)
+
+        self.conn.commit()
+
         # ensure any missing columns are added for older DBs
         self._ensure_order_columns()
 
@@ -170,6 +198,126 @@ class Database:
             balance_without_fee = initial_balance
 
         return balance, balance_without_fee
+
+
+    # ---------- BALANCE STATE METHODS ----------
+    def get_balance_state(self, mode):
+        self.cursor.execute("""
+            SELECT first_balance, tactical_balance, locked
+            FROM balance_state
+            WHERE mode = ?
+            LIMIT 1
+        """, (mode,))
+        row = self.cursor.fetchone()
+        print(row)
+        if not row:
+            return None
+        return {
+            'first_balance': row[0],
+            'tactical_balance': row[1],
+            'locked': row[2]
+        }
+
+    def set_balance_state(self, mode, first_balance, tactical_balance, locked=1, updated_at=None):
+        if updated_at is None:
+            import datetime
+            updated_at = datetime.datetime.now().isoformat()
+
+        self.cursor.execute("""
+            SELECT mode
+            FROM balance_state
+            WHERE mode = ?
+            LIMIT 1
+        """, (mode,))
+        exists = self.cursor.fetchone() is not None
+
+        if exists:
+            self.cursor.execute("""
+                UPDATE balance_state
+                SET first_balance = ?, tactical_balance = ?, locked = ?, updated_at = ?
+                WHERE mode = ?
+            """, (first_balance, tactical_balance, locked, updated_at, mode))
+        else:
+            self.cursor.execute("""
+                INSERT INTO balance_state (mode, first_balance, tactical_balance, locked, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (mode, first_balance, tactical_balance, locked, updated_at))
+
+        self.conn.commit()
+
+    def get_runtime_state(self, mode):
+        self.cursor.execute("""
+            SELECT last_trade_cross_time, skip_trades_left, consecutive_losses, trade_power, trade_power_locked_month
+            FROM runtime_state
+            WHERE mode = ?
+            LIMIT 1
+        """, (mode,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'last_trade_cross_time': row[0],
+            'skip_trades_left': row[1],
+            'consecutive_losses': row[2],
+            'trade_power': row[3],
+            'trade_power_locked_month': row[4],
+        }
+
+    def set_runtime_state(
+        self,
+        mode,
+        last_trade_cross_time=None,
+        skip_trades_left=0,
+        consecutive_losses=0,
+        trade_power=1,
+        trade_power_locked_month=None,
+        updated_at=None,
+    ):
+        if updated_at is None:
+            import datetime
+            updated_at = datetime.datetime.now().isoformat()
+
+        self.cursor.execute("""
+            SELECT mode
+            FROM runtime_state
+            WHERE mode = ?
+            LIMIT 1
+        """, (mode,))
+        exists = self.cursor.fetchone() is not None
+
+        if exists:
+            self.cursor.execute("""
+                UPDATE runtime_state
+                SET last_trade_cross_time = ?, skip_trades_left = ?, consecutive_losses = ?,
+                    trade_power = ?, trade_power_locked_month = ?, updated_at = ?
+                WHERE mode = ?
+            """, (
+                last_trade_cross_time,
+                int(skip_trades_left) if skip_trades_left is not None else 0,
+                int(consecutive_losses) if consecutive_losses is not None else 0,
+                int(trade_power) if trade_power is not None else 1,
+                trade_power_locked_month,
+                updated_at,
+                mode,
+            ))
+        else:
+            self.cursor.execute("""
+                INSERT INTO runtime_state (
+                    mode, last_trade_cross_time, skip_trades_left, consecutive_losses,
+                    trade_power, trade_power_locked_month, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                mode,
+                last_trade_cross_time,
+                int(skip_trades_left) if skip_trades_left is not None else 0,
+                int(consecutive_losses) if consecutive_losses is not None else 0,
+                int(trade_power) if trade_power is not None else 1,
+                trade_power_locked_month,
+                updated_at,
+            ))
+
+        self.conn.commit()
 
 
     def _ensure_order_columns(self):
