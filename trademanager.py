@@ -41,13 +41,29 @@ def trade_duration(open_time: str, close_time: str):
 
 # Trade manager class to encapsulate open/close logic without changing behavior
 class TradeManager:
-    def __init__(self, csv_logger, first_balance, monthly_profit_percent_stop_trade, tactical_balance, monthly_close_filter, monthly_compound) :
+    def __init__(
+        self,
+        csv_logger,
+        first_balance,
+        monthly_profit_percent_stop_trade,
+        tactical_balance,
+        monthly_close_filter,
+        monthly_compound,
+        leverage,
+        safe_leverage_low,
+        safe_leverage_med,
+        safe_leverage_high,
+    ):
         self.csv_logger = csv_logger
         self.first_balance = first_balance
         self.monthly_profit_percent_stop_trade = monthly_profit_percent_stop_trade
         self.tactical_balance = tactical_balance
         self.monthly_close_filter = monthly_close_filter
         self.monthly_compound = monthly_compound
+        self.leverage = leverage
+        self.safe_leverage_low = safe_leverage_low
+        self.safe_leverage_med = safe_leverage_med
+        self.safe_leverage_high = safe_leverage_high
 
 
     # open long processes
@@ -61,16 +77,20 @@ class TradeManager:
         balance_before_trade_no_fee = balance_without_fee
 
         # ---------- Margin ----------
-        if balance >= 50 / 100 * self.tactical_balance:
+        if balance >= trade_amount_percent * self.tactical_balance:
             margin = trade_amount_percent * self.tactical_balance
         else:
             margin = balance * trade_amount_percent
         
         # ---------- Leverage ----------
-        if margin_balance <= self.tactical_balance * 90 / 100:
-            leverage = 3
+        if balance <= self.tactical_balance * 80 / 100:
+            leverage = self.safe_leverage_low
+        elif balance <= self.tactical_balance * 85 / 100:
+            leverage = self.safe_leverage_med
+        elif balance <= self.tactical_balance * 90 / 100:
+            leverage = self.safe_leverage_high
         else:
-            leverage = 5
+            leverage = self.leverage
 
         position_value = margin * leverage
         position_size = position_value / entry_price
@@ -146,10 +166,10 @@ class TradeManager:
         total_profit_percent += profit_percent
         count_closed_orders += 1
 
-        equity_curve.append(balance)
+        equity_curve.append(balance + save_money)
         # ---- calculate max drawdown ----
         peak = max(equity_curve)
-        drawdown = (balance - peak) / peak * 100
+        drawdown = (balance + save_money - peak) / peak * 100
         max_drawdown = min(max_drawdown, drawdown)
 
         # ---- count wins and losses ----
@@ -210,7 +230,7 @@ class TradeManager:
                 balance += self.tactical_balance * 25 / 100
                 save_money -= self.tactical_balance * 25 / 100
 
-        # stop trade if we got 6% for this month
+        # stop trade if we got monthly threshold for this month
         if self.monthly_close_filter == True :
             if profit_percent_per_month >= self.monthly_profit_percent_stop_trade:
                 self.tactical_balance = self.tactical_balance + (self.tactical_balance * self.monthly_compound / 100)
@@ -218,6 +238,9 @@ class TradeManager:
                 balance = self.tactical_balance
                 cooldown_until_index = 0
                 trade_power = False    # off
+        else:
+            if balance >= self.tactical_balance * 1.08:
+                self.tactical_balance = balance
 
         current_position = None
 
@@ -259,16 +282,20 @@ class TradeManager:
         balance_before_trade_no_fee = balance_without_fee
 
         # ---------- Margin ----------
-        if balance >= 50 / 100 * self.tactical_balance:
+        if balance >= trade_amount_percent * self.tactical_balance:
             margin = trade_amount_percent * self.tactical_balance
         else:
             margin = balance * trade_amount_percent
 
         # ---------- Leverage ----------
-        if margin_balance <= self.tactical_balance * 90 / 100:
-            leverage = 3
+        if balance <= self.tactical_balance * 80 / 100:
+            leverage = self.safe_leverage_low
+        elif balance <= self.tactical_balance * 85 / 100:
+            leverage = self.safe_leverage_med
+        elif balance <= self.tactical_balance * 90 / 100:
+            leverage = self.safe_leverage_high
         else:
-            leverage = 5
+            leverage = self.leverage
 
         position_value = margin * leverage
         position_size = position_value / entry_price
@@ -344,10 +371,10 @@ class TradeManager:
         total_profit_percent += profit_percent
         count_closed_orders += 1
 
-        equity_curve.append(balance)
+        equity_curve.append(balance + save_money)
         # ---- calculate max drawdown ----
         peak = max(equity_curve)
-        drawdown = (balance - peak) / peak * 100
+        drawdown = (balance + save_money - peak) / peak * 100
         max_drawdown = min(max_drawdown, drawdown)
 
         # ---- count wins and losses ----
@@ -408,7 +435,7 @@ class TradeManager:
                 balance += self.tactical_balance * 25 / 100
                 save_money -= self.tactical_balance * 25 / 100
 
-        # stop trade if we got 6% for this month
+        # stop trade if we got monthly threshold for this month
         if self.monthly_close_filter == True :
             if profit_percent_per_month >= self.monthly_profit_percent_stop_trade:
                 self.tactical_balance = self.tactical_balance + (self.tactical_balance * self.monthly_compound / 100)
@@ -416,6 +443,9 @@ class TradeManager:
                 balance = self.tactical_balance
                 cooldown_until_index = 0
                 trade_power = False    # off
+        else:
+            if balance >= self.tactical_balance * 1.08:
+                self.tactical_balance = balance
             
         current_position = None
 
