@@ -1,6 +1,7 @@
 import requests
 import time
 import argparse
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import numpy as np
 
@@ -158,13 +159,104 @@ skip_trades_left = 0
 runtime_state_loaded = False
 
 
+@dataclass
+class BotState:
+    balance: float = 1000.0
+    leverage: int = 10
+    save_money: float = 0.0
+    total_wins: int = 0
+    total_wins_long: int = 0
+    total_wins_short: int = 0
+    total_losses: int = 0
+    total_long: int = 0
+    total_short: int = 0
+    total_profit_percent: float = 0.0
+    deducting_fee_total: float = 0.0
+    count_closed_orders: int = 0
+    profit_percent_per_month: float = 0.0
+    lst_profit_percent_per_month: list = field(default_factory=list)
+    profits_lst: list = field(default_factory=list)
+    equity_curve: list = field(default_factory=list)
+    max_drawdown: float = 0.0
+    toobit_balance: float = None
+    entry_price: float = None
+    position_size: float = None
+    position_size_no_fee: float = None
+    margin: float = 0.0
+    margin_no_fee: float = 0.0
+    balance_before_trade: float = None
+    balance_before_trade_no_fee: float = None
+    open_time_value: str = None
+    entry_index: int = None
+    trade_power: bool = True
+    trade_power_locked_month: str = None
+    balance_without_fee: float = 1000.0
+    first_balance: float = None
+    tactical_balance: float = None
+    initial_balance_locked: bool = False
+    toobit_first_balance: float = None
+    toobit_tactical_balance: float = None
+    toobit_initial_balance_locked: bool = False
+    current_position: str = None
+    last_trade_cross_time: str = None
+    consecutive_losses: int = 0
+    skip_trades_left: int = 0
+    runtime_state_loaded: bool = False
+    cooldown_until_index: int = -1
+
+
+BOT_STATE = BotState(
+    balance=balance,
+    leverage=leverage,
+    save_money=save_money,
+    total_wins=total_wins,
+    total_wins_long=total_wins_long,
+    total_wins_short=total_wins_short,
+    total_losses=total_losses,
+    total_long=total_long,
+    total_short=total_short,
+    total_profit_percent=total_profit_percent,
+    deducting_fee_total=deducting_fee_total,
+    count_closed_orders=count_closed_orders,
+    profit_percent_per_month=profit_percent_per_month,
+    lst_profit_percent_per_month=lst_profit_percent_per_month,
+    profits_lst=profits_lst,
+    equity_curve=equity_curve,
+    max_drawdown=max_drawdown,
+    toobit_balance=toobit_balance,
+    entry_price=entry_price,
+    position_size=position_size,
+    position_size_no_fee=position_size_no_fee,
+    margin=margin,
+    margin_no_fee=margin_no_fee,
+    balance_before_trade=balance_before_trade,
+    balance_before_trade_no_fee=balance_before_trade_no_fee,
+    open_time_value=open_time_value,
+    entry_index=entry_index,
+    trade_power=trade_power,
+    trade_power_locked_month=trade_power_locked_month,
+    balance_without_fee=balance_without_fee,
+    first_balance=first_balance,
+    tactical_balance=tactical_balance,
+    initial_balance_locked=initial_balance_locked,
+    toobit_first_balance=toobit_first_balance,
+    toobit_tactical_balance=toobit_tactical_balance,
+    toobit_initial_balance_locked=toobit_initial_balance_locked,
+    current_position=current_position,
+    last_trade_cross_time=last_trade_cross_time,
+    consecutive_losses=consecutive_losses,
+    skip_trades_left=skip_trades_left,
+    runtime_state_loaded=runtime_state_loaded,
+    cooldown_until_index=cooldown_until_index,
+)
+
+
 def _get_balance_state_mode():
     return "toobit" if TOOBIT_SYNC_BALANCE else "local"
 
 
-def _lock_initial_balances(source_balance, reason, db=None, mode=None):
-    global first_balance, tactical_balance, initial_balance_locked
-    if initial_balance_locked:
+def _lock_initial_balances(state, source_balance, reason, db=None, mode=None):
+    if state.initial_balance_locked:
         return
     try:
         base = float(source_balance)
@@ -172,21 +264,20 @@ def _lock_initial_balances(source_balance, reason, db=None, mode=None):
         return
     if base <= 0:
         return
-    first_balance = base
-    tactical_balance = base
-    initial_balance_locked = True
+    state.first_balance = base
+    state.tactical_balance = base
+    state.initial_balance_locked = True
     print(f"Initial balance locked at {base} ({reason})")
     if db is not None:
         state_mode = mode or _get_balance_state_mode()
         try:
-            db.set_balance_state(state_mode, first_balance, tactical_balance, locked=1)
+            db.set_balance_state(state_mode, state.first_balance, state.tactical_balance, locked=1)
         except Exception:
             pass
 
 
-def _lock_toobit_balances(source_balance, reason, db=None):
-    global toobit_first_balance, toobit_tactical_balance, toobit_initial_balance_locked
-    if toobit_initial_balance_locked:
+def _lock_toobit_balances(state, source_balance, reason, db=None):
+    if state.toobit_initial_balance_locked:
         return
     try:
         base = float(source_balance)
@@ -194,13 +285,13 @@ def _lock_toobit_balances(source_balance, reason, db=None):
         return
     if base <= 0:
         return
-    toobit_first_balance = base
-    toobit_tactical_balance = base
-    toobit_initial_balance_locked = True
+    state.toobit_first_balance = base
+    state.toobit_tactical_balance = base
+    state.toobit_initial_balance_locked = True
     print(f"Toobit initial balance locked at {base} ({reason})")
     if db is not None:
         try:
-            db.set_balance_state("toobit", toobit_first_balance, toobit_tactical_balance, locked=1)
+            db.set_balance_state("toobit", state.toobit_first_balance, state.toobit_tactical_balance, locked=1)
         except Exception:
             pass
 
@@ -231,17 +322,16 @@ def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=No
     return live_margin * leverage
 
 
-def init_toobit_balance():
-    global balance, balance_without_fee, first_balance, tactical_balance, toobit_balance
-    toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
+def init_toobit_balance(state):
+    state.toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
     if TOOBIT_SYNC_BALANCE:
-        balance = toobit_balance
-        balance_without_fee = toobit_balance
+        state.balance = state.toobit_balance
+        state.balance_without_fee = state.toobit_balance
         if not LOCK_FIRST_BALANCE_ON_FIRST_TICK:
-            _lock_initial_balances(toobit_balance, "toobit init")
-        print(f"Toobit balance synced: {balance}")
+            _lock_initial_balances(state, state.toobit_balance, "toobit init")
+        print(f"Toobit balance synced: {state.balance}")
     else:
-        print(f"Toobit balance fetched (not synced): {toobit_balance}")
+        print(f"Toobit balance fetched (not synced): {state.toobit_balance}")
 
 
 # ---- load Telegram notifier at startup ----
@@ -342,15 +432,93 @@ def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month
         pass
 
 # Main Trading Logic
-def ma_strategy():
-    global balance, balance_without_fee, current_position, margin, trade_power, cooldown_until_index
-    global leverage, position_size_no_fee, margin_no_fee, balance_before_trade, balance_before_trade_no_fee
-    global deducting_fee_total, profits_lst, total_profit_percent, count_closed_orders, equity_curve, max_drawdown
-    global total_wins, total_wins_long, total_wins_short, total_losses, total_long, total_short
-    global profit_percent_per_month, save_money, toobit_balance, first_balance, tactical_balance
-    global initial_balance_locked, toobit_first_balance, toobit_tactical_balance, toobit_initial_balance_locked
-    global entry_price, position_size, open_time_value, entry_index, trade_power_locked_month
-    global last_trade_cross_time, consecutive_losses, skip_trades_left, runtime_state_loaded
+def ma_strategy(state):
+    balance = state.balance
+    balance_without_fee = state.balance_without_fee
+    current_position = state.current_position
+    margin = state.margin
+    trade_power = state.trade_power
+    cooldown_until_index = state.cooldown_until_index
+    leverage = state.leverage
+    position_size_no_fee = state.position_size_no_fee
+    margin_no_fee = state.margin_no_fee
+    balance_before_trade = state.balance_before_trade
+    balance_before_trade_no_fee = state.balance_before_trade_no_fee
+    deducting_fee_total = state.deducting_fee_total
+    profits_lst = state.profits_lst
+    total_profit_percent = state.total_profit_percent
+    count_closed_orders = state.count_closed_orders
+    equity_curve = state.equity_curve
+    max_drawdown = state.max_drawdown
+    total_wins = state.total_wins
+    total_wins_long = state.total_wins_long
+    total_wins_short = state.total_wins_short
+    total_losses = state.total_losses
+    total_long = state.total_long
+    total_short = state.total_short
+    profit_percent_per_month = state.profit_percent_per_month
+    lst_profit_percent_per_month = state.lst_profit_percent_per_month
+    save_money = state.save_money
+    toobit_balance = state.toobit_balance
+    first_balance = state.first_balance
+    tactical_balance = state.tactical_balance
+    initial_balance_locked = state.initial_balance_locked
+    toobit_first_balance = state.toobit_first_balance
+    toobit_tactical_balance = state.toobit_tactical_balance
+    toobit_initial_balance_locked = state.toobit_initial_balance_locked
+    entry_price = state.entry_price
+    position_size = state.position_size
+    open_time_value = state.open_time_value
+    entry_index = state.entry_index
+    trade_power_locked_month = state.trade_power_locked_month
+    last_trade_cross_time = state.last_trade_cross_time
+    consecutive_losses = state.consecutive_losses
+    skip_trades_left = state.skip_trades_left
+    runtime_state_loaded = state.runtime_state_loaded
+
+    def _persist_state():
+        state.balance = balance
+        state.balance_without_fee = balance_without_fee
+        state.current_position = current_position
+        state.margin = margin
+        state.trade_power = trade_power
+        state.cooldown_until_index = cooldown_until_index
+        state.leverage = leverage
+        state.position_size_no_fee = position_size_no_fee
+        state.margin_no_fee = margin_no_fee
+        state.balance_before_trade = balance_before_trade
+        state.balance_before_trade_no_fee = balance_before_trade_no_fee
+        state.deducting_fee_total = deducting_fee_total
+        state.profits_lst = profits_lst
+        state.total_profit_percent = total_profit_percent
+        state.count_closed_orders = count_closed_orders
+        state.equity_curve = equity_curve
+        state.max_drawdown = max_drawdown
+        state.total_wins = total_wins
+        state.total_wins_long = total_wins_long
+        state.total_wins_short = total_wins_short
+        state.total_losses = total_losses
+        state.total_long = total_long
+        state.total_short = total_short
+        state.profit_percent_per_month = profit_percent_per_month
+        state.lst_profit_percent_per_month = lst_profit_percent_per_month
+        state.save_money = save_money
+        state.toobit_balance = toobit_balance
+        state.first_balance = first_balance
+        state.tactical_balance = tactical_balance
+        state.initial_balance_locked = initial_balance_locked
+        state.toobit_first_balance = toobit_first_balance
+        state.toobit_tactical_balance = toobit_tactical_balance
+        state.toobit_initial_balance_locked = toobit_initial_balance_locked
+        state.entry_price = entry_price
+        state.position_size = position_size
+        state.open_time_value = open_time_value
+        state.entry_index = entry_index
+        state.trade_power_locked_month = trade_power_locked_month
+        state.last_trade_cross_time = last_trade_cross_time
+        state.consecutive_losses = consecutive_losses
+        state.skip_trades_left = skip_trades_left
+        state.runtime_state_loaded = runtime_state_loaded
 
     csv_logger = TradeCSVLogger()
 
@@ -384,6 +552,7 @@ def ma_strategy():
         else:
             # grace period expired — do NOT crash; skip this cycle and remain running
             print("\n⚠️ Still no OHLCV after grace period — skipping this cycle but staying alive.")
+            _persist_state()
             return
 
     # validate we have enough candles for indicators (warn but continue with available data)
@@ -455,7 +624,10 @@ def ma_strategy():
             if base is None:
                 base = balance
                 reason = "local balance fallback (first tick)"
-        _lock_initial_balances(base, reason, db=db, mode=state_mode)
+        _lock_initial_balances(state, base, reason, db=db, mode=state_mode)
+        first_balance = state.first_balance
+        tactical_balance = state.tactical_balance
+        initial_balance_locked = state.initial_balance_locked
 
     if TOOBIT_ENABLED and not toobit_initial_balance_locked:
         tb_base = toobit_balance
@@ -467,7 +639,10 @@ def ma_strategy():
                 print("Toobit balance fetch failed (first tick):", e)
                 tb_base = None
         if tb_base is not None:
-            _lock_toobit_balances(tb_base, "toobit balance (first tick)", db=db)
+            _lock_toobit_balances(state, tb_base, "toobit balance (first tick)", db=db)
+            toobit_first_balance = state.toobit_first_balance
+            toobit_tactical_balance = state.toobit_tactical_balance
+            toobit_initial_balance_locked = state.toobit_initial_balance_locked
 
     # restore runtime strategy state once (persist across restarts)
     if not runtime_state_loaded:
@@ -542,6 +717,7 @@ def ma_strategy():
         except Exception as e:
             print("Toobit balance fetch failed:", e)
             if TOOBIT_SYNC_BALANCE:
+                _persist_state()
                 return
 
         try:
@@ -616,6 +792,7 @@ def ma_strategy():
 
     i = len(close_prices) - 1
     if i <= 0:
+        _persist_state()
         return
 
     ema_16 = ema_16_list[i]
@@ -627,6 +804,7 @@ def ma_strategy():
     atr_ma = atr_ma_list[i]
 
     if ema_16 is None or ma_50 is None or ma_100 is None or ma_200 is None:
+        _persist_state()
         return
 
     # ---- MANAGE TRADES ----
@@ -697,6 +875,7 @@ def ma_strategy():
             trade_power = True
             trade_power_locked_month = None
         else:
+            _persist_state()
             return
 
     if cooldown_until_index > 0:
@@ -710,6 +889,7 @@ def ma_strategy():
             trade_power,
             trade_power_locked_month,
         )
+        _persist_state()
         return
 
     # Refresh entry index for trailing logic (restart-safe).
@@ -823,6 +1003,7 @@ def ma_strategy():
                             )
                         except Exception as e:
                             print("Toobit open LONG failed:", e)
+                            _persist_state()
                             return
 
                     entry_price = updates["entry_price"]
@@ -928,12 +1109,14 @@ def ma_strategy():
         if exit_score >= exit_score_threshold:
             if position_size is None:
                 print("Cannot close LONG: position_size unknown.")
+                _persist_state()
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
                     TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG")
                 except Exception as e:
                     print("Toobit close LONG failed:", e)
+                    _persist_state()
                     return
 
             prev_trade_power = trade_power
@@ -1163,6 +1346,7 @@ def ma_strategy():
                             )
                         except Exception as e:
                             print("Toobit open SHORT failed:", e)
+                            _persist_state()
                             return
 
                     entry_price = updates["entry_price"]
@@ -1269,12 +1453,14 @@ def ma_strategy():
         if exit_score >= exit_score_threshold:
             if position_size is None:
                 print("Cannot close SHORT: position_size unknown.")
+                _persist_state()
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
                     TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT")
                 except Exception as e:
                     print("Toobit close SHORT failed:", e)
+                    _persist_state()
                     return
 
             prev_trade_power = trade_power
@@ -1407,6 +1593,7 @@ def ma_strategy():
         trade_power,
         trade_power_locked_month,
     )
+    _persist_state()
 
 
 # wait on 0, 15, 30, 45 minutes for get data
@@ -1448,7 +1635,7 @@ if args.rammonitor:
 # ---- initialize Toobit balance (live trading) ----
 if TOOBIT_ENABLED:
     try:
-        init_toobit_balance()
+        init_toobit_balance(BOT_STATE)
     except Exception as e:
         print("Toobit init failed, disabling live trading:", e)
         TOOBIT_ENABLED = False
@@ -1457,11 +1644,11 @@ if TOOBIT_ENABLED:
 # MAIN LOOP 
 while True:
     if args.test:
-        ma_strategy()
+        ma_strategy(BOT_STATE)
         break
 
     else:
         wait_for_next_quarter()
-        ma_strategy()
+        ma_strategy(BOT_STATE)
 
     time.sleep(FETCH_WINDOW_SECONDS + 1)
