@@ -1,28 +1,22 @@
 import requests
 import time
 import argparse
-import os
-import hmac
-import hashlib
-import uuid
-from urllib.parse import urlencode
 from datetime import datetime, timezone
 import numpy as np
 
 # My Files
 from indicators import Indicator
-from telegram_bot import TelegramNotifier
+from telegram_bot import create_telegram_notifier
 from database import Database
 from rammonitor import RamMonitor
 from trademanager import TradeManager
 from trade_csv_logger import TradeCSVLogger
+from toobit_client import ToobitClient
+from env_loader import load_dotenv_file
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
-BOT_TOKEN = None
-CHAT_ID = None
-api_key = None
-api_secret = None
+load_dotenv_file()
 
 # ---- Toobit settings ----
 TOOBIT_ENABLED = True
@@ -32,10 +26,23 @@ TOOBIT_CATEGORY = "USDT"
 TOOBIT_SYMBOL = "BTC-SWAP-USDT"
 TOOBIT_BALANCE_ASSET = "USDT"
 TOOBIT_RECV_WINDOW = 5000
+TOOBIT_TIMEOUT_SECONDS = 30
+TOOBIT_MAX_RETRIES = 3
+TOOBIT_BACKOFF_BASE_SECONDS = 1.0
+TOOBIT_BACKOFF_MAX_SECONDS = 8.0
 TOOBIT_REFRESH_BALANCE_EACH_CYCLE = True
 TOOBIT_SYNC_BALANCE = False  # keep local demo balance if False
-TOOBIT_KEY_FILE = "API KEY.txt"
 LOCK_FIRST_BALANCE_ON_FIRST_TICK = True  # lock first/tactical balance when first candle is processed
+TOOBIT_CLIENT = ToobitClient(
+    base_url=TOOBIT_BASE_URL,
+    category=TOOBIT_CATEGORY,
+    balance_asset=TOOBIT_BALANCE_ASSET,
+    recv_window=TOOBIT_RECV_WINDOW,
+    timeout=TOOBIT_TIMEOUT_SECONDS,
+    max_retries=TOOBIT_MAX_RETRIES,
+    backoff_base_seconds=TOOBIT_BACKOFF_BASE_SECONDS,
+    max_backoff_seconds=TOOBIT_BACKOFF_MAX_SECONDS,
+)
 
 # ---- settings is here ----
 balance = 1000
@@ -151,88 +158,6 @@ skip_trades_left = 0
 runtime_state_loaded = False
 
 
-# ------------------ Toobit API helpers ------------------
-def _load_toobit_keys():
-    api_key = os.getenv("TOOBIT_API_KEY")
-    api_secret = os.getenv("TOOBIT_API_SECRET")
-
-    if api_key and api_secret:
-        return api_key.strip(), api_secret.strip()
-
-    key_path = os.path.join(os.path.dirname(__file__), TOOBIT_KEY_FILE)
-    if not os.path.exists(key_path):
-        raise RuntimeError(
-            "Toobit API keys not found. Set TOOBIT_API_KEY/TOOBIT_API_SECRET env vars "
-            f"or create '{TOOBIT_KEY_FILE}'."
-        )
-
-    file_key = None
-    file_secret = None
-    with open(key_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("api_key"):
-                file_key = line.split("=", 1)[1].strip().strip("\"'")
-            elif line.startswith("secret_key"):
-                file_secret = line.split("=", 1)[1].strip().strip("\"'")
-
-    if not file_key or not file_secret:
-        raise RuntimeError(f"Could not parse api_key/secret_key from '{TOOBIT_KEY_FILE}'.")
-
-    return file_key, file_secret
-
-
-def _load_telegram_config():
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if bot_token and chat_id:
-        try:
-            return bot_token.strip(), int(chat_id)
-        except Exception:
-            raise RuntimeError("Invalid TELEGRAM_CHAT_ID env var; must be integer.")
-
-    key_path = os.path.join(os.path.dirname(__file__), TOOBIT_KEY_FILE)
-    if not os.path.exists(key_path):
-        raise RuntimeError(
-            "Telegram config not found. Set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env vars "
-            f"or add BOT_TOKEN_TELEGRAM/CHAT_ID to '{TOOBIT_KEY_FILE}'."
-        )
-
-    file_token = None
-    file_chat_id = None
-    with open(key_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("BOT_TOKEN_TELEGRAM") or line.startswith("BOT_TOKEN"):
-                file_token = line.split("=", 1)[1].strip().strip("\"'")
-            elif line.startswith("CHAT_ID"):
-                file_chat_id = line.split("=", 1)[1].strip().strip("\"'")
-
-    if not file_token or not file_chat_id:
-        raise RuntimeError(f"Could not parse BOT_TOKEN_TELEGRAM/CHAT_ID from '{TOOBIT_KEY_FILE}'.")
-
-    try:
-        return file_token, int(file_chat_id)
-    except Exception:
-        raise RuntimeError("Invalid CHAT_ID in key file; must be integer.")
-
-
-def _toobit_format_number(value, precision=8):
-    if value is None:
-        return None
-    try:
-        value = float(value)
-    except Exception:
-        return str(value)
-    formatted = f"{value:.{precision}f}".rstrip("0").rstrip(".")
-    return formatted if formatted else "0"
-
-
 def _get_balance_state_mode():
     return "toobit" if TOOBIT_SYNC_BALANCE else "local"
 
@@ -306,182 +231,9 @@ def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=No
     return live_margin * leverage
 
 
-def _toobit_signed_request(method, path, params=None):
-    api_key, api_secret = _load_toobit_keys()
-
-    params = params or {}
-    # remove None values
-    params = {k: v for k, v in params.items() if v is not None}
-    params["timestamp"] = int(time.time() * 1000)
-    params["recvWindow"] = TOOBIT_RECV_WINDOW
-
-    # build query string in a stable order
-    query = urlencode([(k, str(params[k])) for k in params])
-    signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-    url = f"{TOOBIT_BASE_URL}{path}?{query}&signature={signature}"
-    headers = {"X-BB-APIKEY": api_key}
-
-    response = requests.request(method, url, headers=headers, timeout=10)
-    try:
-        data = response.json()
-    except Exception:
-        raise RuntimeError(f"Toobit non-JSON response: HTTP {response.status_code} -> {response.text}")
-
-    if response.status_code != 200:
-        raise RuntimeError(f"Toobit HTTP {response.status_code}: {data}")
-
-    if isinstance(data, dict) and data.get("code") not in (None, 200):
-        raise RuntimeError(f"Toobit error {data.get('code')}: {data.get('msg')}")
-
-    return data
-
-
-def toobit_get_balance(asset=TOOBIT_BALANCE_ASSET):
-    data = _toobit_signed_request(
-        "GET",
-        "/api/v1/futures/balance",
-        params={"category": TOOBIT_CATEGORY}
-    )
-
-    # some responses wrap the list in "data"
-    if isinstance(data, dict) and "data" in data:
-        data = data["data"]
-
-    if not isinstance(data, list):
-        raise RuntimeError(f"Unexpected Toobit balance response: {data}")
-
-    for item in data:
-        if item.get("asset") == asset:
-            available = item.get("availableBalance")
-            total = item.get("balance")
-            return float(available if available is not None else total)
-
-    raise RuntimeError(f"Asset {asset} not found in Toobit balance response.")
-
-
-def toobit_get_positions(symbol=None, side=None):
-    params = {"category": TOOBIT_CATEGORY}
-    if symbol:
-        params["symbol"] = symbol
-    if side:
-        params["side"] = side
-    data = _toobit_signed_request("GET", "/api/v1/futures/positions", params=params)
-
-    if isinstance(data, dict) and "data" in data:
-        data = data["data"]
-
-    if not isinstance(data, list):
-        raise RuntimeError(f"Unexpected Toobit positions response: {data}")
-
-    return data
-
-
-def toobit_get_open_position(symbol=TOOBIT_SYMBOL, side=None):
-    positions = toobit_get_positions(symbol=symbol, side=side)
-    for pos in positions:
-        try:
-            qty = float(pos.get("position", 0))
-        except Exception:
-            qty = 0
-        if pos.get("symbol") == symbol and qty > 0:
-            return pos
-    return None
-
-
-def toobit_set_leverage(symbol, leverage):
-    return _toobit_signed_request(
-        "POST",
-        "/api/v1/futures/leverage",
-        params={
-            "symbol": symbol,
-            "leverage": int(leverage),
-            "category": TOOBIT_CATEGORY
-        }
-    )
-
-
-def toobit_place_order(symbol, side, quantity=None, value_quantity=None, price_type="MARKET", order_type="LIMIT"):
-    if quantity is None and value_quantity is None:
-        raise RuntimeError("Toobit order requires quantity or value_quantity.")
-
-    if order_type:
-        order_type = str(order_type).upper()
-    if price_type:
-        price_type = str(price_type).upper()
-
-    # Toobit futures order API expects type=LIMIT/STOP; market orders use priceType=MARKET.
-    if order_type == "MARKET":
-        order_type = "LIMIT"
-        if not price_type:
-            price_type = "MARKET"
-
-    params = {
-        "symbol": symbol,
-        "side": side,
-        "type": order_type,
-        "priceType": price_type,
-        "newClientOrderId": f"bot_{uuid.uuid4().hex[:12]}",
-        "category": TOOBIT_CATEGORY
-    }
-
-    if quantity is not None:
-        qty_val = float(quantity)
-        if qty_val <= 0:
-            raise RuntimeError("Toobit order quantity must be > 0.")
-        params["quantity"] = _toobit_format_number(qty_val, precision=6)
-    if value_quantity is not None:
-        val_qty = float(value_quantity)
-        if val_qty <= 0:
-            raise RuntimeError("Toobit order value_quantity must be > 0.")
-        params["valueQuantity"] = _toobit_format_number(val_qty, precision=2)
-
-    return _toobit_signed_request("POST", "/api/v1/futures/order", params=params)
-
-
-def toobit_close_position(symbol, side):
-    side = side.upper()
-    pos = toobit_get_open_position(symbol=symbol, side=side)
-    if not pos:
-        raise RuntimeError("No open Toobit position to close.")
-
-    qty = pos.get("available")
-    if qty is None:
-        qty = pos.get("position")
-
-    try:
-        qty = float(qty)
-    except Exception:
-        qty = 0
-
-    if qty <= 0:
-        try:
-            qty = float(pos.get("position", 0))
-        except Exception:
-            qty = 0
-
-    if qty <= 0:
-        raise RuntimeError("Toobit position quantity is zero.")
-
-    if side == "LONG":
-        close_side = "SELL_CLOSE"
-    elif side == "SHORT":
-        close_side = "BUY_CLOSE"
-    else:
-        raise RuntimeError(f"Unknown position side: {side}")
-
-    return toobit_place_order(
-        symbol=symbol,
-        side=close_side,
-        quantity=qty,
-        price_type="MARKET",
-        order_type="LIMIT"
-    )
-
-
 def init_toobit_balance():
     global balance, balance_without_fee, first_balance, tactical_balance, toobit_balance
-    toobit_balance = toobit_get_balance()
+    toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
     if TOOBIT_SYNC_BALANCE:
         balance = toobit_balance
         balance_without_fee = toobit_balance
@@ -492,8 +244,10 @@ def init_toobit_balance():
         print(f"Toobit balance fetched (not synced): {toobit_balance}")
 
 
-# ---- load Telegram config at startup ----
-BOT_TOKEN, CHAT_ID = _load_telegram_config()
+# ---- load Telegram notifier at startup ----
+SIGNAL_MESSAGE = create_telegram_notifier(
+    default_symbol="BTCUSDT",
+)
 
 
 # get open, high, low, close, volume with json data
@@ -600,8 +354,7 @@ def ma_strategy():
 
     csv_logger = TradeCSVLogger()
 
-    # send message to telegram
-    signal_message = TelegramNotifier(bot_token=BOT_TOKEN, chat_id = CHAT_ID)
+    signal_message = SIGNAL_MESSAGE
 
     open_times = []
     open_prices = []
@@ -695,7 +448,7 @@ def ma_strategy():
                 base = toobit_balance
             elif TOOBIT_ENABLED:
                 try:
-                    base = toobit_get_balance()
+                    base = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                     toobit_balance = base
                 except Exception as e:
                     print("Toobit balance fetch failed (first tick):", e)
@@ -708,7 +461,7 @@ def ma_strategy():
         tb_base = toobit_balance
         if tb_base is None:
             try:
-                tb_base = toobit_get_balance()
+                tb_base = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                 toobit_balance = tb_base
             except Exception as e:
                 print("Toobit balance fetch failed (first tick):", e)
@@ -781,7 +534,7 @@ def ma_strategy():
     if TOOBIT_ENABLED:
         try:
             if TOOBIT_REFRESH_BALANCE_EACH_CYCLE:
-                tb_balance = toobit_get_balance()
+                tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                 toobit_balance = tb_balance
                 if TOOBIT_SYNC_BALANCE:
                     balance = tb_balance
@@ -792,7 +545,7 @@ def ma_strategy():
                 return
 
         try:
-            pos = toobit_get_open_position(symbol=TOOBIT_SYMBOL)
+            pos = TOOBIT_CLIENT.get_open_position(symbol=TOOBIT_SYMBOL)
             if pos:
                 pos_side = pos.get("side")
                 if pos_side == "LONG":
@@ -1051,7 +804,7 @@ def ma_strategy():
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
                             if toobit_balance is None:
-                                toobit_balance = toobit_get_balance()
+                                toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
                                 toobit_balance,
                                 trade_amount_percent,
@@ -1060,8 +813,8 @@ def ma_strategy():
                             )
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
-                            toobit_set_leverage(TOOBIT_SYMBOL, updates["leverage"])
-                            toobit_place_order(
+                            TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
+                            TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="BUY_OPEN",
                                 value_quantity=live_value_qty,
@@ -1090,7 +843,7 @@ def ma_strategy():
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
-                            tb_balance = toobit_get_balance()
+                            tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             toobit_balance = tb_balance
                             if TOOBIT_SYNC_BALANCE:
                                 balance = tb_balance
@@ -1178,7 +931,7 @@ def ma_strategy():
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    toobit_close_position(TOOBIT_SYMBOL, side="LONG")
+                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG")
                 except Exception as e:
                     print("Toobit close LONG failed:", e)
                     return
@@ -1265,7 +1018,7 @@ def ma_strategy():
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    tb_balance = toobit_get_balance()
+                    tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                     toobit_balance = tb_balance
                     if TOOBIT_SYNC_BALANCE:
                         balance = tb_balance
@@ -1391,7 +1144,7 @@ def ma_strategy():
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
                             if toobit_balance is None:
-                                toobit_balance = toobit_get_balance()
+                                toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
                                 toobit_balance,
                                 trade_amount_percent,
@@ -1400,8 +1153,8 @@ def ma_strategy():
                             )
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
-                            toobit_set_leverage(TOOBIT_SYMBOL, updates["leverage"])
-                            toobit_place_order(
+                            TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
+                            TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="SELL_OPEN",
                                 value_quantity=live_value_qty,
@@ -1430,7 +1183,7 @@ def ma_strategy():
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
-                            tb_balance = toobit_get_balance()
+                            tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             toobit_balance = tb_balance
                             if TOOBIT_SYNC_BALANCE:
                                 balance = tb_balance
@@ -1519,7 +1272,7 @@ def ma_strategy():
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    toobit_close_position(TOOBIT_SYMBOL, side="SHORT")
+                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT")
                 except Exception as e:
                     print("Toobit close SHORT failed:", e)
                     return
@@ -1606,7 +1359,7 @@ def ma_strategy():
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    tb_balance = toobit_get_balance()
+                    tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                     toobit_balance = tb_balance
                     if TOOBIT_SYNC_BALANCE:
                         balance = tb_balance
