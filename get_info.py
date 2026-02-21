@@ -14,6 +14,7 @@ from trademanager import TradeManager
 from trade_csv_logger import TradeCSVLogger
 from toobit_client import ToobitClient
 from env_loader import load_dotenv_file
+from sync_symbol_data import sync_recent_symbol_data
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
@@ -432,7 +433,7 @@ def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month
         pass
 
 # Main Trading Logic
-def ma_strategy(state):
+def ma_strategy(state, manual_action=None):
     balance = state.balance
     balance_without_fee = state.balance_without_fee
     current_position = state.current_position
@@ -661,17 +662,22 @@ def ma_strategy(state):
             trade_power_locked_month = rstate.get("trade_power_locked_month")
         runtime_state_loaded = True
 
-    # move data to database.db
-    print(f"inserting data to database.db at {close_times[-1]}")
-    db.insert_data(symbol= "BTCUSDT",
-                   open_times= open_times[-1],
-                   open_prices= open_prices[-1],
-                   high_prices= high_prices[-1],
-                   low_prices= low_prices[-1],
-                   close_prices= close_prices[-1],
-                   volume_prices= volume_prices[-1],
-                   close_times= close_times[-1]
-                   )
+    # sync the latest 200 closed candles so missed rows are backfilled after outages
+    inserted_count, checked_count = sync_recent_symbol_data(
+        db=db,
+        symbol="BTCUSDT",
+        open_times=open_times,
+        open_prices=open_prices,
+        high_prices=high_prices,
+        low_prices=low_prices,
+        close_prices=close_prices,
+        volume_prices=volume_prices,
+        close_times=close_times,
+        lookback=200,
+    )
+    print(
+        f"symbol_data sync at {close_times[-1]} | checked={checked_count}, inserted_missing={inserted_count}"
+    )
 
     # --- restore open order if exists (persist across restarts)
     open_order = db.get_open_order()
@@ -848,12 +854,19 @@ def ma_strategy(state):
     margin_balance = balance + (margin if current_position is not None else 0)
     current_month = _month_key(close_times[i])
 
+    manual_action = (manual_action or "").strip().lower()
+    manual_mode = bool(manual_action)
+    force_open_long = manual_action == "open_long"
+    force_close_long = manual_action == "close_long"
+    force_open_short = manual_action == "open_short"
+    force_close_short = manual_action == "close_short"
+
     # If monthly filter is disabled manually, always allow trading to continue.
     if not monthly_close_filter:
         trade_power = True
         trade_power_locked_month = None
     # Monthly close filter: re-enable trading at the first candle of next month.
-    elif not trade_power:
+    elif not trade_power and not manual_mode:
         if trade_power_locked_month is None:
             trade_power_locked_month = current_month
             _save_runtime_state(
@@ -878,7 +891,7 @@ def ma_strategy(state):
             _persist_state()
             return
 
-    if cooldown_until_index > 0:
+    if cooldown_until_index > 0 and not manual_mode:
         cooldown_until_index -= 1
         _save_runtime_state(
             db,
@@ -900,12 +913,30 @@ def ma_strategy(state):
         elif entry_index is None:
             entry_index = 0
 
+    if force_close_long and current_position != "long":
+        print("Manual close_long ignored: no active LONG position.")
+        _persist_state()
+        return
+    if force_close_short and current_position != "short":
+        print("Manual close_short ignored: no active SHORT position.")
+        _persist_state()
+        return
+    if (force_open_long or force_open_short) and current_position is not None:
+        print(f"Manual open ignored: active position is {current_position}. Close it first.")
+        _persist_state()
+        return
+
     # ===================== OPEN LONG =====================
-    if current_position is None and cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time:
+    if current_position is None and (
+        force_open_long
+        or (cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time)
+    ):
         entry_score = 0
         can_try_open = True
 
-        if atr_filter:
+        if force_open_long:
+            entry_score = entry_score_threshold
+        elif atr_filter:
             if atr is None or atr_ma is None or atr_ma <= 0:
                 can_try_open = False
             else:
@@ -965,7 +996,7 @@ def ma_strategy(state):
                         entry_score -= entry_late_penalty
 
             if entry_score >= entry_score_threshold:
-                if skip_logic and skip_trades_left > 0:
+                if (not force_open_long) and skip_logic and skip_trades_left > 0:
                     skip_trades_left -= 1
                     last_trade_cross_time = last_cross_time
                     print(f"SKIP LONG | skips left: {skip_trades_left}")
@@ -1019,7 +1050,8 @@ def ma_strategy(state):
                     open_time_value = updates["open_time_value"]
                     current_position = updates["current_position"]
                     entry_index = i
-                    last_trade_cross_time = last_cross_time
+                    if not force_open_long:
+                        last_trade_cross_time = last_cross_time
                     updates = None
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
@@ -1106,7 +1138,7 @@ def ma_strategy(state):
             if body >= atr * opposite_atr_body_mult:
                 exit_score += exit_score_opposite_candle
 
-        if exit_score >= exit_score_threshold:
+        if force_close_long or exit_score >= exit_score_threshold:
             if position_size is None:
                 print("Cannot close LONG: position_size unknown.")
                 _persist_state()
@@ -1242,11 +1274,16 @@ def ma_strategy(state):
 
 
     # ===================== OPEN SHORT =====================
-    if current_position is None and cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time:
+    if current_position is None and (
+        force_open_short
+        or (cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time)
+    ):
         entry_score = 0
         can_try_open = True
 
-        if atr_filter:
+        if force_open_short:
+            entry_score = entry_score_threshold
+        elif atr_filter:
             if atr is None or atr_ma is None or atr_ma <= 0:
                 can_try_open = False
             else:
@@ -1308,7 +1345,7 @@ def ma_strategy(state):
                         entry_score -= entry_late_penalty
 
             if entry_score >= entry_score_threshold:
-                if skip_logic and skip_trades_left > 0:
+                if (not force_open_short) and skip_logic and skip_trades_left > 0:
                     skip_trades_left -= 1
                     last_trade_cross_time = last_cross_time
                     print(f"SKIP SHORT | skips left: {skip_trades_left}")
@@ -1362,7 +1399,8 @@ def ma_strategy(state):
                     open_time_value = updates["open_time_value"]
                     current_position = updates["current_position"]
                     entry_index = i
-                    last_trade_cross_time = last_cross_time
+                    if not force_open_short:
+                        last_trade_cross_time = last_cross_time
                     updates = None
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
@@ -1450,7 +1488,7 @@ def ma_strategy(state):
             if body >= atr * opposite_atr_body_mult:
                 exit_score += exit_score_opposite_candle
 
-        if exit_score >= exit_score_threshold:
+        if force_close_short or exit_score >= exit_score_threshold:
             if position_size is None:
                 print("Cannot close SHORT: position_size unknown.")
                 _persist_state()
@@ -1624,6 +1662,28 @@ parser.add_argument(
     help="Enable a test Bot with out using time filter"
 )
 
+manual_group = parser.add_mutually_exclusive_group()
+manual_group.add_argument(
+    "--open_long",
+    action="store_true",
+    help="Force open LONG using live execution path (Toobit/DB/Telegram)."
+)
+manual_group.add_argument(
+    "--close_long",
+    action="store_true",
+    help="Force close LONG using live execution path (Toobit/DB/Telegram)."
+)
+manual_group.add_argument(
+    "--open_short",
+    action="store_true",
+    help="Force open SHORT using live execution path (Toobit/DB/Telegram)."
+)
+manual_group.add_argument(
+    "--close_short",
+    action="store_true",
+    help="Force close SHORT using live execution path (Toobit/DB/Telegram)."
+)
+
 args = parser.parse_args()
 
 # you can turn on to see bot ram usage:  ----> True/False
@@ -1641,9 +1701,22 @@ if TOOBIT_ENABLED:
         TOOBIT_ENABLED = False
         TOOBIT_EXECUTE_ORDERS = False
 
+manual_action = None
+if args.open_long:
+    manual_action = "open_long"
+elif args.close_long:
+    manual_action = "close_long"
+elif args.open_short:
+    manual_action = "open_short"
+elif args.close_short:
+    manual_action = "close_short"
+
 # MAIN LOOP 
 while True:
-    if args.test:
+    if manual_action is not None:
+        ma_strategy(BOT_STATE, manual_action=manual_action)
+        break
+    elif args.test:
         ma_strategy(BOT_STATE)
         break
 
