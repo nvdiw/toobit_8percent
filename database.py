@@ -209,7 +209,6 @@ class Database:
             LIMIT 1
         """, (mode,))
         row = self.cursor.fetchone()
-        print(row)
         if not row:
             return None
         return {
@@ -340,3 +339,7 @@ class Database:
                     self.conn.commit()
                 except Exception:
                     pass
+
+# db = Database()
+# x = db.get_balance_state("local")
+# print(x)

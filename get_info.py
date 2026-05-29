@@ -15,6 +15,7 @@ from trade_csv_logger import TradeCSVLogger
 from toobit_client import ToobitClient
 from env_loader import load_dotenv_file
 from sync_symbol_data import sync_recent_symbol_data
+from get_ohlcv import get_ohlcv_binance, get_ohlcv_toobit
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
@@ -45,6 +46,9 @@ TOOBIT_CLIENT = ToobitClient(
     backoff_base_seconds=TOOBIT_BACKOFF_BASE_SECONDS,
     max_backoff_seconds=TOOBIT_BACKOFF_MAX_SECONDS,
 )
+
+# ---- TELEGRAM setting ----
+telegram_alerts = False
 
 # ---- settings is here ----
 balance = 1000
@@ -341,40 +345,6 @@ SIGNAL_MESSAGE = create_telegram_notifier(
 )
 
 
-# get open, high, low, close, volume with json data
-def get_ohlcv(
-    symbol="BTCUSDT",
-    interval="15m",
-    limit=100):
-    """
-    Fetch OHLCV data from Binance
-    
-    symbol   : trading pair (default BTCUSDT)
-    interval : timeframe (1m, 5m, 15m, 1h, 4h, 1d, ...)
-    limit    : number of candles
-    """
-
-    url = "https://api.binance.com/api/v3/klines"
-
-    params = {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "limit": limit
-    }
-    print("📊 Fetching OHLCV data...")
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
-
-        return data
-    
-    except Exception as e:
-        # more helpful debug message and explicit None return for callers to handle
-        print("Fetching OHLCV Error:", repr(e))
-        return None
-
-
 def _safe_parse_dt(value):
     if value is None:
         return None
@@ -535,7 +505,7 @@ def ma_strategy(state, manual_action=None):
 
     # get data from binance
     required_candles = 201
-    data = get_ohlcv(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
+    data = get_ohlcv_toobit(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
 
     # If fetch failed (e.g. transient network), retry for a short grace period so the bot doesn't exit
     if not data or len(data) < 2:
@@ -545,7 +515,7 @@ def ma_strategy(state, manual_action=None):
         print(f"⚠️ No OHLCV received — retrying for up to {grace}s (interval={retry_interval}s)...")
         while time.time() - start_ts < grace:
             time.sleep(retry_interval)
-            data = get_ohlcv(symbol="BTCUSDT", interval="15m", limit=required_candles)
+            data = get_ohlcv_toobit(symbol="BTCUSDT", interval="15m", limit=required_candles)
             if data and len(data) >= 2:
                 print("✅ OHLCV recovered")
                 break
@@ -574,17 +544,17 @@ def ma_strategy(state, manual_action=None):
     db = Database(db_name="database.db")
     state_mode = _get_balance_state_mode()
     if not initial_balance_locked:
-        state = db.get_balance_state(state_mode)
-        if state and state.get('first_balance') is not None:
+        balance_state = db.get_balance_state(state_mode)
+        if balance_state and balance_state.get('first_balance') is not None:
             try:
-                first_balance = float(state.get('first_balance'))
+                first_balance = float(balance_state.get('first_balance'))
             except Exception:
-                first_balance = state.get('first_balance')
-            if state.get('tactical_balance') is not None:
+                first_balance = balance_state.get('first_balance')
+            if balance_state.get('tactical_balance') is not None:
                 try:
-                    tactical_balance = float(state.get('tactical_balance'))
+                    tactical_balance = float(balance_state.get('tactical_balance'))
                 except Exception:
-                    tactical_balance = state.get('tactical_balance')
+                    tactical_balance = balance_state.get('tactical_balance')
             else:
                 tactical_balance = first_balance
             initial_balance_locked = True
@@ -662,7 +632,7 @@ def ma_strategy(state, manual_action=None):
             trade_power_locked_month = rstate.get("trade_power_locked_month")
         runtime_state_loaded = True
 
-    # sync the latest 200 closed candles so missed rows are backfilled after outages
+    # sync the latest (required_candles - 1) closed candles so missed rows are backfilled after outages
     inserted_count, checked_count = sync_recent_symbol_data(
         db=db,
         symbol="BTCUSDT",
@@ -673,7 +643,7 @@ def ma_strategy(state, manual_action=None):
         close_prices=close_prices,
         volume_prices=volume_prices,
         close_times=close_times,
-        lookback=200,
+        lookback=required_candles - 1,
     )
     print(
         f"symbol_data sync at {close_times[-1]} | checked={checked_count}, inserted_missing={inserted_count}"
@@ -1085,13 +1055,14 @@ def ma_strategy(state, manual_action=None):
                     print(
                         f"ORDER OPENED #{order_id}: LONG @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}"
                     )
-                    signal_message.send_open_long(
-                        price=close_prices[i],
-                        time_str=close_times[i],
-                        margin=margin,
-                        position_size=position_size,
-                        leverage=leverage,
-                    )
+                    if telegram_alerts:
+                        signal_message.send_open_long(
+                            price=close_prices[i],
+                            time_str=close_times[i],
+                            margin=margin,
+                            position_size=position_size,
+                            leverage=leverage,
+                        )
 
     # ===================== CLOSE LONG =====================
     if current_position == "long":
@@ -1260,17 +1231,18 @@ def ma_strategy(state, manual_action=None):
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: LONG closed @ {close_prices[i]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_long(
-                price=close_prices[i],
-                time_str=close_times[i],
-                profit=profit,
-                profit_percent=profit_percent,
-                pnl=pnl,
-                pnl_percent=pnl_percent,
-                balance_before=balance_before_trade,
-                balance_after=total_balance,
-                margin=margin,
-            )
+            if telegram_alerts:
+                signal_message.send_close_long(
+                    price=close_prices[i],
+                    time_str=close_times[i],
+                    profit=profit,
+                    profit_percent=profit_percent,
+                    pnl=pnl,
+                    pnl_percent=pnl_percent,
+                    balance_before=balance_before_trade,
+                    balance_after=total_balance,
+                    margin=margin,
+                )
 
 
     # ===================== OPEN SHORT =====================
@@ -1434,13 +1406,14 @@ def ma_strategy(state, manual_action=None):
                     print(
                         f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}"
                     )
-                    signal_message.send_open_short(
-                        price=close_prices[i],
-                        time_str=close_times[i],
-                        margin=margin,
-                        position_size=position_size,
-                        leverage=leverage,
-                    )
+                    if telegram_alerts:
+                        signal_message.send_open_short(
+                            price=close_prices[i],
+                            time_str=close_times[i],
+                            margin=margin,
+                            position_size=position_size,
+                            leverage=leverage,
+                        )
 
 
     # ===================== CLOSE SHORT =====================
@@ -1610,17 +1583,18 @@ def ma_strategy(state, manual_action=None):
                     print("DB update_order_close failed:", e)
 
             print(f"ORDER CLOSED #{order_id}: SHORT closed @ {close_prices[i]} | P/L: {profit} ({profit_percent}%)")
-            signal_message.send_close_short(
-                price=close_prices[i],
-                time_str=close_times[i],
-                profit=profit,
-                profit_percent=profit_percent,
-                pnl=pnl,
-                pnl_percent=pnl_percent,
-                balance_before=balance_before_trade,
-                balance_after=total_balance,
-                margin=margin,
-            )
+            if telegram_alerts:
+                signal_message.send_close_short(
+                    price=close_prices[i],
+                    time_str=close_times[i],
+                    profit=profit,
+                    profit_percent=profit_percent,
+                    pnl=pnl,
+                    pnl_percent=pnl_percent,
+                    balance_before=balance_before_trade,
+                    balance_after=total_balance,
+                    margin=margin,
+                )
 
     _save_runtime_state(
         db,
@@ -1638,11 +1612,14 @@ def ma_strategy(state, manual_action=None):
 def wait_for_next_quarter():
     while True:
         now = datetime.now(timezone.utc)
-        minute = now.minute
-        second = now.second
 
-        if minute in VALID_MINUTES and second < FETCH_WINDOW_SECONDS:
+        if (
+            now.minute in VALID_MINUTES
+            and now.second >= 5
+            and now.second < 10
+        ):
             return
+
         time.sleep(0.3)
 
 
