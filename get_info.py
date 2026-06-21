@@ -4,6 +4,10 @@ import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import numpy as np
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+import os
 
 # My Files
 from indicators import Indicator
@@ -20,6 +24,39 @@ from get_ohlcv import get_ohlcv_binance, get_ohlcv_toobit
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
 load_dotenv_file()
+
+
+# Create logs directory if it doesn't exist
+os.makedirs("logs", exist_ok=True)
+
+logger = logging.getLogger("bot")
+logger.setLevel(logging.INFO)
+
+# Prevent duplicate handlers if this file is imported multiple times
+if not logger.handlers:
+
+    # File handler (writes logs to file with daily rotation)
+    file_handler = TimedRotatingFileHandler(
+        "logs/trade.log",
+        when="midnight",
+        backupCount=30,
+        encoding="utf-8"
+    )
+
+    # Console handler (prints logs to terminal)
+    console_handler = logging.StreamHandler()
+
+    # Log format
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s"
+    )
+
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 # ---- Toobit settings ----
 TOOBIT_ENABLED = True
@@ -278,7 +315,7 @@ def _lock_initial_balances(state, source_balance, reason, db=None, mode=None):
         try:
             db.set_balance_state(state_mode, state.first_balance, state.tactical_balance, locked=1)
         except Exception:
-            pass
+            logger.exception(f"set_balance_state failed: {e}")
 
 
 def _lock_toobit_balances(state, source_balance, reason, db=None):
@@ -298,7 +335,7 @@ def _lock_toobit_balances(state, source_balance, reason, db=None):
         try:
             db.set_balance_state("toobit", state.toobit_first_balance, state.toobit_tactical_balance, locked=1)
         except Exception:
-            pass
+            logger.exception(f"set_balance_state failed: {e}")
 
 
 def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=None):
@@ -400,7 +437,7 @@ def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month
             trade_power_locked_month=locked_month,
         )
     except Exception:
-        pass
+        logger.exception(f"set_runtime_state failed: {e}")
 
 # Main Trading Logic
 def ma_strategy(state, manual_action=None):
@@ -591,7 +628,7 @@ def ma_strategy(state, manual_action=None):
                     base = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                     toobit_balance = base
                 except Exception as e:
-                    print("Toobit balance fetch failed (first tick):", e)
+                    logger.exception(f"Toobit balance fetch failed (first tick): {e}")
             if base is None:
                 base = balance
                 reason = "local balance fallback (first tick)"
@@ -607,7 +644,7 @@ def ma_strategy(state, manual_action=None):
                 tb_base = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                 toobit_balance = tb_base
             except Exception as e:
-                print("Toobit balance fetch failed (first tick):", e)
+                logger.exception(f"Toobit balance fetch failed (first tick): {e}")
                 tb_base = None
         if tb_base is not None:
             _lock_toobit_balances(state, tb_base, "toobit balance (first tick)", db=db)
@@ -691,7 +728,7 @@ def ma_strategy(state, manual_action=None):
                     balance = tb_balance
                     balance_without_fee = tb_balance
         except Exception as e:
-            print("Toobit balance fetch failed:", e)
+            logger.exception(f"Toobit balance fetch failed: {e}")
             if TOOBIT_SYNC_BALANCE:
                 _persist_state()
                 return
@@ -750,7 +787,7 @@ def ma_strategy(state, manual_action=None):
                 open_time_value = None
                 entry_index = None
         except Exception as e:
-            print("Toobit position sync failed:", e)
+            logger.exception(f"Toobit position sync failed: {e}")
     else:
         if TOOBIT_SYNC_BALANCE:
             balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
@@ -1003,7 +1040,7 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                             )
                         except Exception as e:
-                            print("Toobit open LONG failed:", e)
+                            logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
                             return
 
@@ -1032,7 +1069,7 @@ def ma_strategy(state, manual_action=None):
                                 balance = tb_balance
                                 balance_without_fee = tb_balance
                         except Exception as e:
-                            print("Toobit balance refresh failed:", e)
+                            logger.exception(f"Toobit balance refresh failed: {e}")
 
                     order_id = db.insert_open_order(
                         symbol="BTCUSDT",
@@ -1052,8 +1089,9 @@ def ma_strategy(state, manual_action=None):
                         current_position=current_position,
                     )
 
-                    print(
-                        f"ORDER OPENED #{order_id}: LONG @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}"
+                    logger.info(
+                        f"ORDER OPENED #{order_id}: LONG @ {entry_price} | "
+                        f"margin={margin} | lev={leverage}"
                     )
                     if telegram_alerts:
                         signal_message.send_open_long(
@@ -1118,7 +1156,7 @@ def ma_strategy(state, manual_action=None):
                 try:
                     TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG")
                 except Exception as e:
-                    print("Toobit close LONG failed:", e)
+                    logger.exception(f"Toobit close LONG failed: {e}")
                     _persist_state()
                     return
 
@@ -1200,7 +1238,7 @@ def ma_strategy(state, manual_action=None):
             try:
                 db.set_balance_state(state_mode, first_balance, tactical_balance, locked=1)
             except Exception:
-                pass
+                logger.exception(f"set_balance_state failed: {e}")
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
@@ -1210,7 +1248,7 @@ def ma_strategy(state, manual_action=None):
                         balance = tb_balance
                         balance_without_fee = tb_balance
                 except Exception as e:
-                    print("Toobit balance refresh failed:", e)
+                    logger.exception(f"Toobit balance refresh failed: {e}")
 
             total_balance = balance + (margin if current_position is not None else 0) + save_money
 
@@ -1228,9 +1266,12 @@ def ma_strategy(state, manual_action=None):
                         margin_no_fee=margin_no_fee,
                     )
                 except Exception as e:
-                    print("DB update_order_close failed:", e)
+                    logger.exception(f"DB update_order_close failed: {e}")
 
-            print(f"ORDER CLOSED #{order_id}: LONG closed @ {close_prices[i]} | P/L: {profit} ({profit_percent}%)")
+            logger.info(
+                f"ORDER CLOSED #{order_id}: LONG | "
+                f"exit={close_prices[i]} | profit={profit}"
+            )
             if telegram_alerts:
                 signal_message.send_close_long(
                     price=close_prices[i],
@@ -1354,7 +1395,7 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                             )
                         except Exception as e:
-                            print("Toobit open SHORT failed:", e)
+                            logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()
                             return
 
@@ -1383,7 +1424,7 @@ def ma_strategy(state, manual_action=None):
                                 balance = tb_balance
                                 balance_without_fee = tb_balance
                         except Exception as e:
-                            print("Toobit balance refresh failed:", e)
+                            logger.exception(f"Toobit balance refresh failed: {e}")
 
                     order_id = db.insert_open_order(
                         symbol="BTCUSDT",
@@ -1403,8 +1444,9 @@ def ma_strategy(state, manual_action=None):
                         current_position=current_position,
                     )
 
-                    print(
-                        f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | size={position_size} | margin={margin} | lev={leverage}"
+                    logger.info(
+                        f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | "
+                        f"margin={margin} | lev={leverage}"
                     )
                     if telegram_alerts:
                         signal_message.send_open_short(
@@ -1470,7 +1512,7 @@ def ma_strategy(state, manual_action=None):
                 try:
                     TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT")
                 except Exception as e:
-                    print("Toobit close SHORT failed:", e)
+                    logger.exception(f"Toobit close SHORT failed: {e}")
                     _persist_state()
                     return
 
@@ -1552,7 +1594,7 @@ def ma_strategy(state, manual_action=None):
             try:
                 db.set_balance_state(state_mode, first_balance, tactical_balance, locked=1)
             except Exception:
-                pass
+                logger.exception(f"set_balance_state failed: {e}")
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
@@ -1562,7 +1604,7 @@ def ma_strategy(state, manual_action=None):
                         balance = tb_balance
                         balance_without_fee = tb_balance
                 except Exception as e:
-                    print("Toobit balance refresh failed:", e)
+                    logger.exception(f"Toobit balance refresh failed: {e}")
 
             total_balance = balance + (margin if current_position is not None else 0) + save_money
 
@@ -1580,9 +1622,12 @@ def ma_strategy(state, manual_action=None):
                         margin_no_fee=margin_no_fee,
                     )
                 except Exception as e:
-                    print("DB update_order_close failed:", e)
+                    logger.exception(f"DB update_order_close failed: {e}")
 
-            print(f"ORDER CLOSED #{order_id}: SHORT closed @ {close_prices[i]} | P/L: {profit} ({profit_percent}%)")
+            logger.info(
+                f"ORDER CLOSED #{order_id}: SHORT | "
+                f"exit={close_prices[i]} | profit={profit}"
+            )
             if telegram_alerts:
                 signal_message.send_close_short(
                     price=close_prices[i],
@@ -1615,8 +1660,7 @@ def wait_for_next_quarter():
 
         if (
             now.minute in VALID_MINUTES
-            and now.second >= 5
-            and now.second < 10
+            and 20 <= now.second < 25
         ):
             return
 
@@ -1674,7 +1718,7 @@ if TOOBIT_ENABLED:
     try:
         init_toobit_balance(BOT_STATE)
     except Exception as e:
-        print("Toobit init failed, disabling live trading:", e)
+        logger.exception(f"Toobit init failed, disabling live trading: {e}")
         TOOBIT_ENABLED = False
         TOOBIT_EXECUTE_ORDERS = False
 
