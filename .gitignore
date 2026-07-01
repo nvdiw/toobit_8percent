@@ -18,3 +18,4 @@ test4.py
 database_previous.db
 __pycache__/get_ohlcv.cpython-313.pyc
 test5.py
+logs/trade.log

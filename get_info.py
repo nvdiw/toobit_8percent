@@ -96,7 +96,7 @@ safe_leverage_low = 2
 trade_amount_percent = 0.5  # 50% of balance per trade
 monthly_profit_percent_stop_trade = 8    # if 8% per month profit --> don't trade on that month 
 monthly_compound = 3    # after get 'monthly_profit_percent_stop_trade' per month how much money goes for next month
-monthly_close_filter = False
+monthly_close_filter = True
 adx_filter = True
 volume_filter = True
 atr_filter = True
@@ -1038,6 +1038,7 @@ def ma_strategy(state, manual_action=None):
                                 value_quantity=live_value_qty,
                                 price_type="MARKET",
                                 order_type="LIMIT",
+                                strategy="MA",
                             )
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
@@ -1393,6 +1394,7 @@ def ma_strategy(state, manual_action=None):
                                 value_quantity=live_value_qty,
                                 price_type="MARKET",
                                 order_type="LIMIT",
+                                strategy="MA",
                             )
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")

@@ -91,6 +91,16 @@ class Database:
 
         self.conn.commit()
 
+        # order counter
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_counter (
+            strategy TEXT PRIMARY KEY,
+            counter INTEGER NOT NULL
+        )
+        """)
+
+        self.conn.commit()
+
         # ensure any missing columns are added for older DBs
         self._ensure_order_columns()
 
@@ -339,6 +349,35 @@ class Database:
                     self.conn.commit()
                 except Exception:
                     pass
+
+    # get number of count orderID's of any strategy
+    def get_order_counter(self, strategy):
+        self.cursor.execute("""
+            SELECT counter
+            FROM order_counter
+            WHERE strategy = ?
+            LIMIT 1
+        """, (strategy,))
+
+        row = self.cursor.fetchone()
+
+        if row is None:
+            return 0
+
+        return row[0]
+
+    # increase number of orderID
+    def increment_order_counter(self, strategy):
+        counter = self.get_order_counter(strategy) + 1
+
+        self.cursor.execute("""
+            INSERT OR REPLACE INTO order_counter(strategy, counter)
+            VALUES (?, ?)
+        """, (strategy, counter))
+
+        self.conn.commit()
+
+        return counter
 
 # db = Database()
 # x = db.get_balance_state("local")

@@ -2,10 +2,12 @@ import hashlib
 import hmac
 import os
 import time
-import uuid
 from urllib.parse import urlencode
 
 import requests
+
+# My Codes
+from database import Database
 
 
 class ToobitClient:
@@ -28,10 +30,19 @@ class ToobitClient:
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
         self.max_backoff_seconds = max_backoff_seconds
+        self.db = Database()
 
     def _retry_delay(self, attempt_index):
         delay = self.backoff_base_seconds * (2 ** max(0, attempt_index - 1))
         return min(delay, self.max_backoff_seconds)
+
+    #count orderID 
+    def generate_client_order_id(self, strategy):
+        strategy = strategy.upper()
+
+        counter = self.db.increment_order_counter(strategy)
+
+        return f"BOT_{strategy}_{counter:06d}"
 
     @staticmethod
     def _is_retryable_status(status_code):
@@ -176,7 +187,7 @@ class ToobitClient:
             },
         )
 
-    def place_order(self, symbol, side, quantity=None, value_quantity=None, price_type="MARKET", order_type="LIMIT"):
+    def place_order(self, symbol, side, quantity=None, value_quantity=None, price_type="MARKET", order_type="LIMIT", strategy=None, client_order_id=None,):
         if quantity is None and value_quantity is None:
             raise RuntimeError("Toobit order requires quantity or value_quantity.")
 
@@ -190,14 +201,19 @@ class ToobitClient:
             if not price_type:
                 price_type = "MARKET"
 
+        if client_order_id is None and strategy is not None:
+            client_order_id = self.generate_client_order_id(strategy)
+
         params = {
             "symbol": symbol,
             "side": side,
             "type": order_type,
             "priceType": price_type,
-            "newClientOrderId": f"bot_{uuid.uuid4().hex[:12]}",
             "category": self.category,
         }
+
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id
 
         if quantity is not None:
             qty_val = float(quantity)
