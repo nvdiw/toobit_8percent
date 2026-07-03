@@ -1032,7 +1032,7 @@ def ma_strategy(state, manual_action=None):
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
-                            TOOBIT_CLIENT.place_order(
+                            result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="BUY_OPEN",
                                 value_quantity=live_value_qty,
@@ -1040,6 +1040,7 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                                 strategy="MA",
                             )
+                            client_order_id = result["client_order_id"]
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
@@ -1088,6 +1089,7 @@ def ma_strategy(state, manual_action=None):
                         margin_no_fee=margin_no_fee,
                         position_size_no_fee=position_size_no_fee,
                         current_position=current_position,
+                        client_order_id=client_order_id,
                     )
 
                     logger.info(
@@ -1155,7 +1157,7 @@ def ma_strategy(state, manual_action=None):
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG")
+                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG", strategy="MA",)
                 except Exception as e:
                     logger.exception(f"Toobit close LONG failed: {e}")
                     _persist_state()
@@ -1388,7 +1390,7 @@ def ma_strategy(state, manual_action=None):
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
-                            TOOBIT_CLIENT.place_order(
+                            result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="SELL_OPEN",
                                 value_quantity=live_value_qty,
@@ -1396,6 +1398,7 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                                 strategy="MA",
                             )
+                            client_order_id = result["client_order_id"]
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()
@@ -1444,6 +1447,7 @@ def ma_strategy(state, manual_action=None):
                         margin_no_fee=margin_no_fee,
                         position_size_no_fee=position_size_no_fee,
                         current_position=current_position,
+                        client_order_id=client_order_id,
                     )
 
                     logger.info(
@@ -1512,7 +1516,7 @@ def ma_strategy(state, manual_action=None):
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT")
+                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT", strategy="MA",)
                 except Exception as e:
                     logger.exception(f"Toobit close SHORT failed: {e}")
                     _persist_state()

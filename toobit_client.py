@@ -227,9 +227,17 @@ class ToobitClient:
                 raise RuntimeError("Toobit order value_quantity must be > 0.")
             params["valueQuantity"] = self._format_number(val_qty, precision=2)
 
-        return self._signed_request("POST", "/api/v1/futures/order", params=params)
+        response = self._signed_request(
+            "POST",
+            "/api/v1/futures/order",
+            params=params,
+        )
 
-    def close_position(self, symbol, side):
+        response["client_order_id"] = client_order_id
+
+        return response
+
+    def close_position(self, symbol, side, strategy):
         side = side.upper()
         pos = self.get_open_position(symbol=symbol, side=side)
         if not pos:
@@ -266,4 +274,5 @@ class ToobitClient:
             quantity=qty,
             price_type="MARKET",
             order_type="LIMIT",
+            strategy=strategy,
         )

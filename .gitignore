@@ -19,3 +19,5 @@ database_previous.db
 __pycache__/get_ohlcv.cpython-313.pyc
 test5.py
 logs/trade.log
+logs/trade.log.2026-06-21
+logs/trade.log.2026-07-02
