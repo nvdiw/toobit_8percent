@@ -167,12 +167,18 @@ class ToobitClient:
 
     def get_open_position(self, symbol, side=None):
         positions = self.get_positions(symbol=symbol, side=side)
+        expected_side = str(side).upper() if side else None
         for pos in positions:
             try:
                 qty = float(pos.get("position", 0))
             except Exception:
                 qty = 0
-            if pos.get("symbol") == symbol and qty > 0:
+            position_side = str(pos.get("side") or "").upper()
+            if (
+                pos.get("symbol") == symbol
+                and qty > 0
+                and (expected_side is None or position_side == expected_side)
+            ):
                 return pos
         return None
 
@@ -237,8 +243,76 @@ class ToobitClient:
 
         return response
 
-    def close_position(self, symbol, side, strategy):
+    def get_order(self, order_id=None, client_order_id=None):
+        if order_id is None and not client_order_id:
+            raise RuntimeError("Toobit order query requires order_id or client_order_id.")
+
+        return self._signed_request(
+            "GET",
+            "/api/v1/futures/order",
+            params={
+                "orderId": order_id,
+                "origClientOrderId": client_order_id,
+                "type": "LIMIT",
+                "category": self.category,
+            },
+        )
+
+    @staticmethod
+    def order_details(response):
+        if not isinstance(response, dict):
+            return {}
+        data = response.get("data")
+        if isinstance(data, dict):
+            return data
+        order = response.get("order")
+        if isinstance(order, dict):
+            return order
+        return response
+
+    @classmethod
+    def executed_quantity(cls, response):
+        details = cls.order_details(response)
+        for key in ("executedQty", "executeQty"):
+            try:
+                quantity = float(details.get(key, 0))
+            except (TypeError, ValueError):
+                continue
+            if quantity > 0:
+                return quantity
+        return None
+
+    @classmethod
+    def exchange_order_id(cls, response):
+        value = cls.order_details(response).get("orderId")
+        return str(value) if value not in (None, "") else None
+
+    def resolve_executed_quantity(self, response=None, client_order_id=None, attempts=5, delay=0.2):
+        quantity = self.executed_quantity(response)
+        if quantity is not None:
+            return quantity
+
+        if not client_order_id:
+            return None
+
+        for attempt in range(attempts):
+            queried = self.get_order(client_order_id=client_order_id)
+            quantity = self.executed_quantity(queried)
+            if quantity is not None:
+                return quantity
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+        return None
+
+    def close_position(self, symbol, side, strategy, quantity):
         side = side.upper()
+        try:
+            requested_qty = float(quantity)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Bot-owned Toobit quantity is missing or invalid; refusing to close.") from exc
+        if requested_qty <= 0:
+            raise RuntimeError("Bot-owned Toobit quantity must be > 0; refusing to close.")
+
         pos = self.get_open_position(symbol=symbol, side=side)
         if not pos:
             raise RuntimeError("No open Toobit position to close.")
@@ -260,6 +334,16 @@ class ToobitClient:
 
         if qty <= 0:
             raise RuntimeError("Toobit position quantity is zero.")
+
+        # A Toobit position can aggregate manual and bot trades. If the total
+        # available quantity has fallen below the bot-owned amount, ownership of
+        # the remainder is ambiguous, so fail closed instead of touching it.
+        if qty + 1e-12 < requested_qty:
+            raise RuntimeError(
+                "Available Toobit quantity is smaller than the bot-owned quantity; "
+                "refusing to close an ambiguous position."
+            )
+        qty = requested_qty
 
         if side == "LONG":
             close_side = "SELL_CLOSE"

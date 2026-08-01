@@ -58,7 +58,9 @@ class Database:
             margin_no_fee REAL,
             position_size_no_fee REAL,
             current_position TEXT,
-            client_order_id TEXT
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            bot_quantity REAL
         )
         """)
 
@@ -127,19 +129,22 @@ class Database:
     # ---------- ORDER METHODS ----------
     def insert_open_order(self, symbol, side, entry_price, open_time, position_size, margin, leverage, status="open",
                      balance=None, balance_without_fee=None, balance_before_trade=None, balance_before_trade_no_fee=None,
-                     margin_no_fee=None, position_size_no_fee=None, current_position=None, client_order_id=None,):
+                     margin_no_fee=None, position_size_no_fee=None, current_position=None, client_order_id=None,
+                     exchange_order_id=None, bot_quantity=None):
         # extended insert supporting additional balance and fee-related fields
         self.cursor.execute("""
         INSERT INTO orders (
             symbol, side, entry_price, open_time, position_size, margin, leverage, status,
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
-            margin_no_fee, position_size_no_fee, current_position, client_order_id
+            margin_no_fee, position_size_no_fee, current_position, client_order_id,
+            exchange_order_id, bot_quantity
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             symbol, side, entry_price, open_time, position_size, margin, leverage, status,
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
-            margin_no_fee, position_size_no_fee, current_position, client_order_id
+            margin_no_fee, position_size_no_fee, current_position, client_order_id,
+            exchange_order_id, bot_quantity
         ))
         self.conn.commit()
         return self.cursor.lastrowid
@@ -155,11 +160,21 @@ class Database:
                             balance_without_fee, margin, margin_no_fee, order_id))
         self.conn.commit()
 
+    def update_order_execution(self, order_id, exchange_order_id=None, bot_quantity=None):
+        self.cursor.execute("""
+        UPDATE orders
+        SET exchange_order_id = COALESCE(?, exchange_order_id),
+            bot_quantity = COALESCE(?, bot_quantity)
+        WHERE id = ?
+        """, (exchange_order_id, bot_quantity, order_id))
+        self.conn.commit()
+
     def get_open_order(self):
         self.cursor.execute("""
         SELECT id, symbol, side, entry_price, open_time, position_size, margin, leverage,
                balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
-               margin_no_fee, position_size_no_fee, current_position
+               margin_no_fee, position_size_no_fee, current_position, client_order_id,
+               exchange_order_id, bot_quantity
         FROM orders
         WHERE status = 'open'
         ORDER BY id DESC
@@ -183,7 +198,10 @@ class Database:
             'balance_before_trade_no_fee': row[11],
             'margin_no_fee': row[12],
             'position_size_no_fee': row[13],
-            'current_position': row[14]
+            'current_position': row[14],
+            'client_order_id': row[15],
+            'exchange_order_id': row[16],
+            'bot_quantity': row[17],
         }
 
     def get_current_balances(self, initial_balance=1000):
@@ -341,7 +359,10 @@ class Database:
             'balance_before_trade_no_fee': 'REAL',
             'margin_no_fee': 'REAL',
             'position_size_no_fee': 'REAL',
-            'current_position': 'TEXT'
+            'current_position': 'TEXT',
+            'client_order_id': 'TEXT',
+            'exchange_order_id': 'TEXT',
+            'bot_quantity': 'REAL'
         }
         for col, col_type in additions.items():
             if col not in cols:

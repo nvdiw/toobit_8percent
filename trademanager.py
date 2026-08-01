@@ -1,40 +1,30 @@
 # Calculate Trade Duration
+from datetime import datetime, timezone
+
+
 def trade_duration(open_time: str, close_time: str):
-    # format: YYYY-MM-DD HH:MM:SS.microseconds
+    """Return elapsed whole days/hours/minutes for ISO-8601 timestamps."""
 
-    def parse(t):
-        t = t.strip()
+    def parse(value):
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid trade timestamp: {value!r}") from exc
 
-        # remove timezone if exists
-        if "+" in t:
-            t = t.split("+")[0]
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
 
-        date, time = t.split(" ")
-        y, m, d = map(int, date.split("-"))
-
-        h, mi, s = time.split(":")
-        s = int(float(s))  # drop microseconds if any
-
-        return y, m, d, int(h), int(mi), s
-
-
-    def to_seconds(y, m, d, h, mi, s):
-        # days per month (no leap year handling for simplicity)
-        mdays = [31,28,31,30,31,30,31,31,30,31,30,31]
-
-        days = y * 365 + sum(mdays[:m-1]) + (d - 1)
-        return days * 86400 + h * 3600 + mi * 60 + s
-
-    o = to_seconds(*parse(open_time))
-    c = to_seconds(*parse(close_time))
-
-    diff = c - o
-
-    days = diff // 86400
-    diff %= 86400
-    hours = diff // 3600
-    diff %= 3600
-    minutes = diff // 60
+    diff = parse(close_time) - parse(open_time)
+    total_minutes = int(diff.total_seconds() // 60)
+    days, remaining_minutes = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remaining_minutes, 60)
 
     return days, hours, minutes
 

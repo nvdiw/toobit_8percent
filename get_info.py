@@ -689,6 +689,9 @@ def ma_strategy(state, manual_action=None):
     # --- restore open order if exists (persist across restarts)
     open_order = db.get_open_order()
     order_id = None
+    client_order_id = None
+    exchange_order_id = None
+    bot_quantity = None
     if open_order is not None:
         order_id = open_order['id']
         current_position = open_order['side']
@@ -697,6 +700,9 @@ def ma_strategy(state, manual_action=None):
         margin = open_order['margin']
         leverage = open_order['leverage']
         open_time_value = open_order['open_time']
+        client_order_id = open_order.get('client_order_id')
+        exchange_order_id = open_order.get('exchange_order_id')
+        bot_quantity = open_order.get('bot_quantity')
         # restore additional saved fields if present
         if open_order.get('balance') is not None:
             balance = open_order.get('balance')
@@ -734,58 +740,38 @@ def ma_strategy(state, manual_action=None):
                 return
 
         try:
-            pos = TOOBIT_CLIENT.get_open_position(symbol=TOOBIT_SYMBOL)
-            if pos:
-                pos_side = pos.get("side")
-                if pos_side == "LONG":
-                    current_position = "long"
-                elif pos_side == "SHORT":
-                    current_position = "short"
-                sync_live_to_local = TOOBIT_SYNC_BALANCE or order_id is None or margin in (None, 0)
-                avg_price = pos.get("avgPrice")
-                if sync_live_to_local and avg_price not in (None, "", "0", 0):
-                    try:
-                        entry_price = float(avg_price)
-                    except Exception:
-                        pass
-                pos_lev = pos.get("leverage")
-                if sync_live_to_local and pos_lev not in (None, "", "0", 0):
-                    try:
-                        leverage = int(float(pos_lev))
-                    except Exception:
-                        pass
-                pos_margin = pos.get("margin")
-                live_margin = None
-                if pos_margin not in (None, "", "0", 0):
-                    try:
-                        live_margin = float(pos_margin)
-                    except Exception:
-                        live_margin = None
-                if sync_live_to_local and live_margin not in (None, 0):
-                    margin = live_margin
-                if position_size is None and entry_price and margin and leverage:
-                    try:
-                        position_size = (float(margin) * float(leverage)) / float(entry_price)
-                    except Exception:
-                        pass
-                if position_size_no_fee in (None, 0) and position_size is not None:
-                    position_size_no_fee = position_size
-                if margin_no_fee in (None, 0) and margin:
-                    margin_no_fee = margin
-                if balance_before_trade is None:
-                    balance_before_trade = balance
-                if balance_before_trade_no_fee is None:
-                    balance_before_trade_no_fee = balance_without_fee
-                if open_time_value is None:
-                    open_time_value = datetime.now(timezone.utc).isoformat()
-            else:
-                if current_position is not None:
-                    print("Warning: Toobit shows no open position; clearing local position.")
+            # The exchange position may contain manual trades. Only a local DB
+            # order carrying our BOT_ client id establishes bot ownership.
+            if order_id is None:
                 current_position = None
                 entry_price = None
                 position_size = None
                 open_time_value = None
                 entry_index = None
+            else:
+                expected_side = str(current_position or open_order.get("side", "")).upper()
+                pos = TOOBIT_CLIENT.get_open_position(
+                    symbol=TOOBIT_SYMBOL,
+                    side=expected_side,
+                )
+                if not pos:
+                    print("Warning: bot-owned Toobit position is no longer open; no close order will be sent.")
+                    current_position = None
+                    entry_index = None
+                elif not str(client_order_id or "").startswith("BOT_"):
+                    print("Warning: open DB order has no BOT_ client id; live close is disabled for safety.")
+                elif bot_quantity in (None, 0):
+                    bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
+                        client_order_id=client_order_id,
+                    )
+                    if bot_quantity is not None:
+                        db.update_order_execution(
+                            order_id,
+                            exchange_order_id=exchange_order_id,
+                            bot_quantity=bot_quantity,
+                        )
+                    else:
+                        print("Warning: bot order quantity could not be verified; live close is disabled for safety.")
         except Exception as e:
             logger.exception(f"Toobit position sync failed: {e}")
     else:
@@ -1041,6 +1027,16 @@ def ma_strategy(state, manual_action=None):
                                 strategy="MA",
                             )
                             client_order_id = result["client_order_id"]
+                            exchange_order_id = TOOBIT_CLIENT.exchange_order_id(result)
+                            bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
+                                response=result,
+                                client_order_id=client_order_id,
+                            )
+                            if bot_quantity is None:
+                                logger.warning(
+                                    "Toobit LONG opened but executed quantity is not verified yet; "
+                                    "live closing will remain disabled until it can be verified."
+                                )
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
@@ -1090,6 +1086,8 @@ def ma_strategy(state, manual_action=None):
                         position_size_no_fee=position_size_no_fee,
                         current_position=current_position,
                         client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
+                        bot_quantity=bot_quantity,
                     )
 
                     logger.info(
@@ -1157,7 +1155,22 @@ def ma_strategy(state, manual_action=None):
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="LONG", strategy="MA",)
+                    if order_id is None or not str(client_order_id or "").startswith("BOT_"):
+                        raise RuntimeError("Cannot prove this LONG belongs to the bot; refusing live close.")
+                    if bot_quantity in (None, 0):
+                        bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
+                            client_order_id=client_order_id,
+                        )
+                        if bot_quantity is not None:
+                            db.update_order_execution(order_id, bot_quantity=bot_quantity)
+                    if bot_quantity in (None, 0):
+                        raise RuntimeError("Bot-owned LONG quantity is unknown; refusing live close.")
+                    TOOBIT_CLIENT.close_position(
+                        TOOBIT_SYMBOL,
+                        side="LONG",
+                        strategy="MA",
+                        quantity=bot_quantity,
+                    )
                 except Exception as e:
                     logger.exception(f"Toobit close LONG failed: {e}")
                     _persist_state()
@@ -1399,6 +1412,16 @@ def ma_strategy(state, manual_action=None):
                                 strategy="MA",
                             )
                             client_order_id = result["client_order_id"]
+                            exchange_order_id = TOOBIT_CLIENT.exchange_order_id(result)
+                            bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
+                                response=result,
+                                client_order_id=client_order_id,
+                            )
+                            if bot_quantity is None:
+                                logger.warning(
+                                    "Toobit SHORT opened but executed quantity is not verified yet; "
+                                    "live closing will remain disabled until it can be verified."
+                                )
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()
@@ -1448,6 +1471,8 @@ def ma_strategy(state, manual_action=None):
                         position_size_no_fee=position_size_no_fee,
                         current_position=current_position,
                         client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
+                        bot_quantity=bot_quantity,
                     )
 
                     logger.info(
@@ -1516,7 +1541,22 @@ def ma_strategy(state, manual_action=None):
                 return
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
-                    TOOBIT_CLIENT.close_position(TOOBIT_SYMBOL, side="SHORT", strategy="MA",)
+                    if order_id is None or not str(client_order_id or "").startswith("BOT_"):
+                        raise RuntimeError("Cannot prove this SHORT belongs to the bot; refusing live close.")
+                    if bot_quantity in (None, 0):
+                        bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
+                            client_order_id=client_order_id,
+                        )
+                        if bot_quantity is not None:
+                            db.update_order_execution(order_id, bot_quantity=bot_quantity)
+                    if bot_quantity in (None, 0):
+                        raise RuntimeError("Bot-owned SHORT quantity is unknown; refusing live close.")
+                    TOOBIT_CLIENT.close_position(
+                        TOOBIT_SYMBOL,
+                        side="SHORT",
+                        strategy="MA",
+                        quantity=bot_quantity,
+                    )
                 except Exception as e:
                     logger.exception(f"Toobit close SHORT failed: {e}")
                     _persist_state()
