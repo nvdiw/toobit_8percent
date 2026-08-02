@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import numpy as np
 import logging
-from logging.handlers import TimedRotatingFileHandler
 
 import os
 
@@ -20,6 +19,12 @@ from toobit_client import ToobitClient
 from env_loader import load_dotenv_file
 from sync_symbol_data import sync_recent_symbol_data
 from get_ohlcv import get_ohlcv_binance, get_ohlcv_toobit
+from logging_utils import (
+    DailyDirectoryFileHandler,
+    RecordCategoryFilter,
+    UTCFormatter,
+    format_utc_timestamp,
+)
 
 VALID_MINUTES = {0, 15, 30, 45}
 FETCH_WINDOW_SECONDS = 10
@@ -34,29 +39,39 @@ logger.setLevel(logging.INFO)
 
 # Prevent duplicate handlers if this file is imported multiple times
 if not logger.handlers:
-
-    # File handler (writes logs to file with daily rotation)
-    file_handler = TimedRotatingFileHandler(
-        "logs/trade.log",
-        when="midnight",
-        backupCount=30,
-        encoding="utf-8"
-    )
-
-    # Console handler (prints logs to terminal)
-    console_handler = logging.StreamHandler()
-
-    # Log format
-    formatter = logging.Formatter(
+    formatter = UTCFormatter(
         "%(asctime)s | %(levelname)s | %(message)s"
     )
 
-    file_handler.setFormatter(formatter)
+    def _daily_handler(filename, *, level=None, category=None):
+        handler = DailyDirectoryFileHandler(
+            base_dir="logs",
+            filename=filename,
+            encoding="utf-8",
+        )
+        handler.setFormatter(formatter)
+        if level is not None:
+            handler.setLevel(level)
+        if category is not None:
+            handler.addFilter(RecordCategoryFilter(category))
+        return handler
+
+    # Every record is kept in all.log and copied to its specialized log.
+    all_handler = _daily_handler("all.log")
+    error_handler = _daily_handler("errors.log", level=logging.ERROR)
+    trade_handler = _daily_handler("trades.log", category="trade")
+    check_handler = _daily_handler("checks.log", category="check")
+    console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
 
-    # Add handlers to logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    for handler in (
+        all_handler,
+        error_handler,
+        trade_handler,
+        check_handler,
+        console_handler,
+    ):
+        logger.addHandler(handler)
 
 # ---- Toobit settings ----
 TOOBIT_ENABLED = True
@@ -314,7 +329,7 @@ def _lock_initial_balances(state, source_balance, reason, db=None, mode=None):
         state_mode = mode or _get_balance_state_mode()
         try:
             db.set_balance_state(state_mode, state.first_balance, state.tactical_balance, locked=1)
-        except Exception:
+        except Exception as e:
             logger.exception(f"set_balance_state failed: {e}")
 
 
@@ -334,7 +349,7 @@ def _lock_toobit_balances(state, source_balance, reason, db=None):
     if db is not None:
         try:
             db.set_balance_state("toobit", state.toobit_first_balance, state.toobit_tactical_balance, locked=1)
-        except Exception:
+        except Exception as e:
             logger.exception(f"set_balance_state failed: {e}")
 
 
@@ -436,11 +451,16 @@ def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month
             trade_power=1 if power else 0,
             trade_power_locked_month=locked_month,
         )
-    except Exception:
+    except Exception as e:
         logger.exception(f"set_runtime_state failed: {e}")
 
 # Main Trading Logic
 def ma_strategy(state, manual_action=None):
+    logger.info(
+        f"CHECK START | mode={'manual' if manual_action else 'scheduled'}"
+        f" | action={manual_action or 'none'}",
+        extra={"category": "check"},
+    )
     balance = state.balance
     balance_without_fee = state.balance_without_fee
     current_position = state.current_position
@@ -549,23 +569,32 @@ def ma_strategy(state, manual_action=None):
         start_ts = time.time()
         grace = 60  # seconds to tolerate transient outage
         retry_interval = 5
-        print(f"⚠️ No OHLCV received — retrying for up to {grace}s (interval={retry_interval}s)...")
+        logger.warning(
+            f"CHECK RETRY | no OHLCV | grace={grace}s | interval={retry_interval}s",
+            extra={"category": "check"},
+        )
         while time.time() - start_ts < grace:
             time.sleep(retry_interval)
             data = get_ohlcv_toobit(symbol="BTCUSDT", interval="15m", limit=required_candles)
             if data and len(data) >= 2:
-                print("✅ OHLCV recovered")
+                logger.info("CHECK RECOVERED | OHLCV available", extra={"category": "check"})
                 break
             print(".", end="", flush=True)
         else:
             # grace period expired — do NOT crash; skip this cycle and remain running
-            print("\n⚠️ Still no OHLCV after grace period — skipping this cycle but staying alive.")
+            logger.error(
+                "CHECK FAILED | no OHLCV after grace period | cycle skipped",
+                extra={"category": "check"},
+            )
             _persist_state()
             return
 
     # validate we have enough candles for indicators (warn but continue with available data)
     if len(data) < required_candles:
-        print(f"⚠️ Warning: fetched {len(data)} candles (expected {required_candles}); continuing with available data.")
+        logger.warning(
+            f"CHECK PARTIAL | candles={len(data)} | expected={required_candles}",
+            extra={"category": "check"},
+        )
 
     # Fetch OHLCV data from Binance and normalize candle timestamps (UTC)
     for i in range(len(data) - 1):
@@ -682,8 +711,11 @@ def ma_strategy(state, manual_action=None):
         close_times=close_times,
         lookback=required_candles - 1,
     )
-    print(
-        f"symbol_data sync at {close_times[-1]} | checked={checked_count}, inserted_missing={inserted_count}"
+    logger.info(
+        f"CHECK COMPLETE | candle_time={format_utc_timestamp(close_times[-1])} | "
+        f"candles={len(close_times)} | checked={checked_count} | "
+        f"inserted_missing={inserted_count}",
+        extra={"category": "check"},
     )
 
     # --- restore open order if exists (persist across restarts)
@@ -1092,7 +1124,9 @@ def ma_strategy(state, manual_action=None):
 
                     logger.info(
                         f"ORDER OPENED #{order_id}: LONG @ {entry_price} | "
-                        f"margin={margin} | lev={leverage}"
+                        f"margin={margin} | lev={leverage} | "
+                        f"trade_time={format_utc_timestamp(open_time_value)}",
+                        extra={"category": "trade"},
                     )
                     if telegram_alerts:
                         signal_message.send_open_long(
@@ -1253,7 +1287,7 @@ def ma_strategy(state, manual_action=None):
 
             try:
                 db.set_balance_state(state_mode, first_balance, tactical_balance, locked=1)
-            except Exception:
+            except Exception as e:
                 logger.exception(f"set_balance_state failed: {e}")
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
@@ -1286,7 +1320,9 @@ def ma_strategy(state, manual_action=None):
 
             logger.info(
                 f"ORDER CLOSED #{order_id}: LONG | "
-                f"exit={close_prices[i]} | profit={profit}"
+                f"exit={close_prices[i]} | profit={profit} | "
+                f"trade_time={format_utc_timestamp(close_times[i])}",
+                extra={"category": "trade"},
             )
             if telegram_alerts:
                 signal_message.send_close_long(
@@ -1477,7 +1513,9 @@ def ma_strategy(state, manual_action=None):
 
                     logger.info(
                         f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | "
-                        f"margin={margin} | lev={leverage}"
+                        f"margin={margin} | lev={leverage} | "
+                        f"trade_time={format_utc_timestamp(open_time_value)}",
+                        extra={"category": "trade"},
                     )
                     if telegram_alerts:
                         signal_message.send_open_short(
@@ -1639,7 +1677,7 @@ def ma_strategy(state, manual_action=None):
 
             try:
                 db.set_balance_state(state_mode, first_balance, tactical_balance, locked=1)
-            except Exception:
+            except Exception as e:
                 logger.exception(f"set_balance_state failed: {e}")
 
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
@@ -1672,7 +1710,9 @@ def ma_strategy(state, manual_action=None):
 
             logger.info(
                 f"ORDER CLOSED #{order_id}: SHORT | "
-                f"exit={close_prices[i]} | profit={profit}"
+                f"exit={close_prices[i]} | profit={profit} | "
+                f"trade_time={format_utc_timestamp(close_times[i])}",
+                extra={"category": "trade"},
             )
             if telegram_alerts:
                 signal_message.send_close_short(

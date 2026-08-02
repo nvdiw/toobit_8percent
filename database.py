@@ -249,7 +249,7 @@ class Database:
     def set_balance_state(self, mode, first_balance, tactical_balance, locked=1, updated_at=None):
         if updated_at is None:
             import datetime
-            updated_at = datetime.datetime.now().isoformat()
+            updated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         self.cursor.execute("""
             SELECT mode
@@ -303,7 +303,7 @@ class Database:
     ):
         if updated_at is None:
             import datetime
-            updated_at = datetime.datetime.now().isoformat()
+            updated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         self.cursor.execute("""
             SELECT mode
