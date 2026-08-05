@@ -150,6 +150,10 @@ class TradeManager:
         profit_percent = profit * 100 / balance_before_trade
         profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
         pnl_percent = (pnl / margin) * 100
+        balance_after_trade = balance
+        position_value = entry_price * position_size
+        position_value_no_fee = entry_price * position_size_no_fee
+        price_change_percent = (close_price - entry_price) * 100 / entry_price
 
         deducting_fee_total += total_fee
         profits_lst.append(profit)
@@ -180,6 +184,7 @@ class TradeManager:
 
         close_time_value = open_times
         days, hours, minutes = trade_duration(open_time_value, close_time_value)
+        duration_seconds = days * 86400 + hours * 3600 + minutes * 60
 
 
         print("Close LONG at price:", close_price, "$", "| Close Time:", close_time_value, "| leverage:", leverage)
@@ -256,6 +261,17 @@ class TradeManager:
             'profit_percent': profit_percent,
             'pnl': pnl,
             'pnl_percent': pnl_percent,
+            'pnl_no_fee': pnl_no_fee,
+            'entry_fee': entry_fee,
+            'exit_fee': exit_fee,
+            'total_fee': total_fee,
+            'fee_rate': fee_rate,
+            'balance_after_trade': balance_after_trade,
+            'trade_amount_percent': trade_amount_percent,
+            'position_value': position_value,
+            'position_value_no_fee': position_value_no_fee,
+            'duration_seconds': duration_seconds,
+            'price_change_percent': price_change_percent,
             'margin': margin,
             'margin_no_fee': margin_no_fee
         }
@@ -355,6 +371,10 @@ class TradeManager:
         profit_percent = profit * 100 / balance_before_trade
         profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
         pnl_percent = (pnl / margin) * 100
+        balance_after_trade = balance
+        position_value = entry_price * position_size
+        position_value_no_fee = entry_price * position_size_no_fee
+        price_change_percent = (entry_price - close_price) * 100 / entry_price
 
         deducting_fee_total += total_fee
         profits_lst.append(profit)
@@ -385,6 +405,7 @@ class TradeManager:
 
         close_time_value = open_times
         days, hours, minutes = trade_duration(open_time_value, close_time_value)
+        duration_seconds = days * 86400 + hours * 3600 + minutes * 60
 
 
         print("Close SHORT at price:", close_price, "$", "| Close Time:", close_time_value, "| leverage:", leverage)
@@ -461,6 +482,17 @@ class TradeManager:
             'profit_percent': profit_percent,
             'pnl': pnl,
             'pnl_percent': pnl_percent,
+            'pnl_no_fee': pnl_no_fee,
+            'entry_fee': entry_fee,
+            'exit_fee': exit_fee,
+            'total_fee': total_fee,
+            'fee_rate': fee_rate,
+            'balance_after_trade': balance_after_trade,
+            'trade_amount_percent': trade_amount_percent,
+            'position_value': position_value,
+            'position_value_no_fee': position_value_no_fee,
+            'duration_seconds': duration_seconds,
+            'price_change_percent': price_change_percent,
             'margin': margin,
             'margin_no_fee': margin_no_fee
         }

@@ -1120,6 +1120,10 @@ def ma_strategy(state, manual_action=None):
                         client_order_id=client_order_id,
                         exchange_order_id=exchange_order_id,
                         bot_quantity=bot_quantity,
+                        position_value=margin * leverage,
+                        position_value_no_fee=margin_no_fee * leverage,
+                        trade_amount_percent=account_trade_amount_percent,
+                        fee_rate=fee_rate,
                     )
 
                     logger.info(
@@ -1268,6 +1272,15 @@ def ma_strategy(state, manual_action=None):
             profit_percent = updates.get("profit_percent")
             pnl = updates.get("pnl")
             pnl_percent = updates.get("pnl_percent")
+            ledger_metrics = {
+                key: updates.get(key)
+                for key in (
+                    "pnl", "pnl_percent", "pnl_no_fee", "entry_fee", "exit_fee",
+                    "total_fee", "fee_rate", "balance_after_trade",
+                    "trade_amount_percent", "position_value", "position_value_no_fee",
+                    "duration_seconds", "price_change_percent",
+                )
+            }
             updates = None
             entry_index = None
             entry_price = None
@@ -1314,6 +1327,7 @@ def ma_strategy(state, manual_action=None):
                         balance_without_fee=balance_without_fee,
                         margin=margin,
                         margin_no_fee=margin_no_fee,
+                        **ledger_metrics,
                     )
                 except Exception as e:
                     logger.exception(f"DB update_order_close failed: {e}")
@@ -1509,6 +1523,10 @@ def ma_strategy(state, manual_action=None):
                         client_order_id=client_order_id,
                         exchange_order_id=exchange_order_id,
                         bot_quantity=bot_quantity,
+                        position_value=margin * leverage,
+                        position_value_no_fee=margin_no_fee * leverage,
+                        trade_amount_percent=account_trade_amount_percent,
+                        fee_rate=fee_rate,
                     )
 
                     logger.info(
@@ -1658,6 +1676,15 @@ def ma_strategy(state, manual_action=None):
             profit_percent = updates.get("profit_percent")
             pnl = updates.get("pnl")
             pnl_percent = updates.get("pnl_percent")
+            ledger_metrics = {
+                key: updates.get(key)
+                for key in (
+                    "pnl", "pnl_percent", "pnl_no_fee", "entry_fee", "exit_fee",
+                    "total_fee", "fee_rate", "balance_after_trade",
+                    "trade_amount_percent", "position_value", "position_value_no_fee",
+                    "duration_seconds", "price_change_percent",
+                )
+            }
             updates = None
             entry_index = None
             entry_price = None
@@ -1704,6 +1731,7 @@ def ma_strategy(state, manual_action=None):
                         balance_without_fee=balance_without_fee,
                         margin=margin,
                         margin_no_fee=margin_no_fee,
+                        **ledger_metrics,
                     )
                 except Exception as e:
                     logger.exception(f"DB update_order_close failed: {e}")

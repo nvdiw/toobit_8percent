@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+import math
 import sqlite3
 
 
@@ -60,7 +62,20 @@ class Database:
             current_position TEXT,
             client_order_id TEXT,
             exchange_order_id TEXT,
-            bot_quantity REAL
+            bot_quantity REAL,
+            pnl REAL,
+            pnl_percent REAL,
+            pnl_no_fee REAL,
+            entry_fee REAL,
+            exit_fee REAL,
+            total_fee REAL,
+            fee_rate REAL,
+            balance_after_trade REAL,
+            trade_amount_percent REAL,
+            position_value REAL,
+            position_value_no_fee REAL,
+            duration_seconds INTEGER,
+            price_change_percent REAL
         )
         """)
 
@@ -106,6 +121,7 @@ class Database:
 
         # ensure any missing columns are added for older DBs
         self._ensure_order_columns()
+        self._backfill_order_metrics()
 
     # ---------- INSERT METHODS ----------
 
@@ -130,34 +146,48 @@ class Database:
     def insert_open_order(self, symbol, side, entry_price, open_time, position_size, margin, leverage, status="open",
                      balance=None, balance_without_fee=None, balance_before_trade=None, balance_before_trade_no_fee=None,
                      margin_no_fee=None, position_size_no_fee=None, current_position=None, client_order_id=None,
-                     exchange_order_id=None, bot_quantity=None):
+                     exchange_order_id=None, bot_quantity=None, position_value=None,
+                     position_value_no_fee=None, trade_amount_percent=None, fee_rate=None):
         # extended insert supporting additional balance and fee-related fields
         self.cursor.execute("""
         INSERT INTO orders (
             symbol, side, entry_price, open_time, position_size, margin, leverage, status,
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
             margin_no_fee, position_size_no_fee, current_position, client_order_id,
-            exchange_order_id, bot_quantity
+            exchange_order_id, bot_quantity, position_value, position_value_no_fee,
+            trade_amount_percent, fee_rate
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             symbol, side, entry_price, open_time, position_size, margin, leverage, status,
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
             margin_no_fee, position_size_no_fee, current_position, client_order_id,
-            exchange_order_id, bot_quantity
+            exchange_order_id, bot_quantity, position_value, position_value_no_fee,
+            trade_amount_percent, fee_rate
         ))
         self.conn.commit()
         return self.cursor.lastrowid
 
     def update_order_close(self, order_id, close_price, close_time, profit, profit_percent, balance,
-                            balance_without_fee, margin, margin_no_fee, status="closed"):
+                            balance_without_fee, margin, margin_no_fee, status="closed", *, pnl=None,
+                            pnl_percent=None, pnl_no_fee=None, entry_fee=None, exit_fee=None,
+                            total_fee=None, fee_rate=None, balance_after_trade=None,
+                            trade_amount_percent=None, position_value=None,
+                            position_value_no_fee=None, duration_seconds=None,
+                            price_change_percent=None):
         self.cursor.execute("""
         UPDATE orders
         SET close_price = ?, close_time = ?, profit = ?, profit_percent = ?, status = ?, balance = ?,
-                            balance_without_fee = ?, margin = ?, margin_no_fee = ?
+            balance_without_fee = ?, margin = ?, margin_no_fee = ?, pnl = ?, pnl_percent = ?,
+            pnl_no_fee = ?, entry_fee = ?, exit_fee = ?, total_fee = ?, fee_rate = ?,
+            balance_after_trade = ?, trade_amount_percent = ?, position_value = ?,
+            position_value_no_fee = ?, duration_seconds = ?, price_change_percent = ?
         WHERE id = ?
         """, (close_price, close_time, profit, profit_percent, status, balance,
-                            balance_without_fee, margin, margin_no_fee, order_id))
+            balance_without_fee, margin, margin_no_fee, pnl, pnl_percent, pnl_no_fee,
+            entry_fee, exit_fee, total_fee, fee_rate, balance_after_trade,
+            trade_amount_percent, position_value, position_value_no_fee,
+            duration_seconds, price_change_percent, order_id))
         self.conn.commit()
 
     def update_order_execution(self, order_id, exchange_order_id=None, bot_quantity=None):
@@ -362,7 +392,20 @@ class Database:
             'current_position': 'TEXT',
             'client_order_id': 'TEXT',
             'exchange_order_id': 'TEXT',
-            'bot_quantity': 'REAL'
+            'bot_quantity': 'REAL',
+            'pnl': 'REAL',
+            'pnl_percent': 'REAL',
+            'pnl_no_fee': 'REAL',
+            'entry_fee': 'REAL',
+            'exit_fee': 'REAL',
+            'total_fee': 'REAL',
+            'fee_rate': 'REAL',
+            'balance_after_trade': 'REAL',
+            'trade_amount_percent': 'REAL',
+            'position_value': 'REAL',
+            'position_value_no_fee': 'REAL',
+            'duration_seconds': 'INTEGER',
+            'price_change_percent': 'REAL',
         }
         for col, col_type in additions.items():
             if col not in cols:
@@ -371,6 +414,130 @@ class Database:
                     self.conn.commit()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _metric_float(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _metric_duration_seconds(open_time, close_time):
+        def parse(value):
+            if value in (None, ""):
+                return None
+            if isinstance(value, datetime):
+                parsed = value
+            else:
+                text = str(value).strip().replace("Z", "+00:00")
+                try:
+                    parsed = datetime.fromisoformat(text)
+                except (TypeError, ValueError):
+                    return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        opened = parse(open_time)
+        closed = parse(close_time)
+        if opened is None or closed is None:
+            return None
+        return max(0, int((closed - opened).total_seconds()))
+
+    def _backfill_order_metrics(self):
+        self.cursor.execute("""
+            SELECT id, side, entry_price, close_price, open_time, close_time,
+                   position_size, position_size_no_fee, margin, leverage,
+                   profit, balance_before_trade, pnl, pnl_percent, pnl_no_fee,
+                   entry_fee, exit_fee, total_fee, fee_rate, balance_after_trade,
+                   trade_amount_percent, position_value, position_value_no_fee,
+                   duration_seconds, price_change_percent
+            FROM orders
+        """)
+        rows = self.cursor.fetchall()
+        for row in rows:
+            (
+                order_id, side, entry_price, close_price, open_time, close_time,
+                position_size, position_size_no_fee, margin, leverage, profit,
+                balance_before, stored_pnl, stored_pnl_percent, stored_pnl_no_fee,
+                stored_entry_fee, stored_exit_fee, stored_total_fee, stored_fee_rate,
+                stored_balance_after, stored_trade_percent, stored_position_value,
+                stored_position_value_no_fee, stored_duration, stored_price_change,
+            ) = row
+            entry = self._metric_float(entry_price)
+            close = self._metric_float(close_price)
+            size = self._metric_float(position_size)
+            size_no_fee = self._metric_float(position_size_no_fee)
+            used_margin = self._metric_float(margin)
+            used_leverage = self._metric_float(leverage)
+            net_profit = self._metric_float(profit)
+            before = self._metric_float(balance_before)
+            direction = -1.0 if str(side or "").strip().lower() in {"short", "sell"} else 1.0
+
+            position_value = self._metric_float(stored_position_value)
+            if position_value is None:
+                if entry is not None and size is not None:
+                    position_value = entry * size
+                elif used_margin is not None and used_leverage is not None:
+                    position_value = used_margin * used_leverage
+            position_value_no_fee = self._metric_float(stored_position_value_no_fee)
+            if position_value_no_fee is None and entry is not None and size_no_fee is not None:
+                position_value_no_fee = entry * size_no_fee
+            pnl = self._metric_float(stored_pnl)
+            if pnl is None and None not in (entry, close, size):
+                pnl = size * (close - entry) * direction
+            pnl_no_fee = self._metric_float(stored_pnl_no_fee)
+            if pnl_no_fee is None and None not in (entry, close, size_no_fee):
+                pnl_no_fee = size_no_fee * (close - entry) * direction
+            pnl_percent = self._metric_float(stored_pnl_percent)
+            if pnl_percent is None and pnl is not None and used_margin:
+                pnl_percent = pnl * 100 / used_margin
+            total_fee = self._metric_float(stored_total_fee)
+            if total_fee is None and pnl is not None and net_profit is not None:
+                total_fee = max(0.0, pnl - net_profit)
+            fee_rate = self._metric_float(stored_fee_rate)
+            entry_notional = entry * size if None not in (entry, size) else None
+            exit_notional = close * size if None not in (close, size) else None
+            if fee_rate is None and total_fee is not None and entry_notional is not None and exit_notional is not None:
+                denominator = entry_notional + exit_notional
+                fee_rate = total_fee / denominator if denominator else None
+            entry_fee = self._metric_float(stored_entry_fee)
+            if entry_fee is None and fee_rate is not None and entry_notional is not None:
+                entry_fee = entry_notional * fee_rate
+            exit_fee = self._metric_float(stored_exit_fee)
+            if exit_fee is None and fee_rate is not None and exit_notional is not None:
+                exit_fee = exit_notional * fee_rate
+            balance_after = self._metric_float(stored_balance_after)
+            if balance_after is None and before is not None and net_profit is not None:
+                balance_after = before + net_profit
+            trade_percent = self._metric_float(stored_trade_percent)
+            if trade_percent is None and used_margin is not None and before:
+                trade_percent = used_margin / before
+            duration = stored_duration if stored_duration is not None else self._metric_duration_seconds(open_time, close_time)
+            price_change = self._metric_float(stored_price_change)
+            if price_change is None and entry and close is not None:
+                price_change = (close - entry) * direction * 100 / entry
+
+            self.cursor.execute("""
+                UPDATE orders
+                SET pnl = COALESCE(pnl, ?), pnl_percent = COALESCE(pnl_percent, ?),
+                    pnl_no_fee = COALESCE(pnl_no_fee, ?), entry_fee = COALESCE(entry_fee, ?),
+                    exit_fee = COALESCE(exit_fee, ?), total_fee = COALESCE(total_fee, ?),
+                    fee_rate = COALESCE(fee_rate, ?), balance_after_trade = COALESCE(balance_after_trade, ?),
+                    trade_amount_percent = COALESCE(trade_amount_percent, ?),
+                    position_value = COALESCE(position_value, ?),
+                    position_value_no_fee = COALESCE(position_value_no_fee, ?),
+                    duration_seconds = COALESCE(duration_seconds, ?),
+                    price_change_percent = COALESCE(price_change_percent, ?)
+                WHERE id = ?
+            """, (
+                pnl, pnl_percent, pnl_no_fee, entry_fee, exit_fee, total_fee,
+                fee_rate, balance_after, trade_percent, position_value,
+                position_value_no_fee, duration, price_change, order_id,
+            ))
+        self.conn.commit()
 
     # get number of count orderID's of any strategy
     def get_order_counter(self, strategy):
