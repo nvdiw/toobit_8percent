@@ -609,6 +609,7 @@ def ma_strategy(state, manual_action=None):
     # setup DB and restore persisted balance state
     db = Database(db_name="database.db")
     state_mode = _get_balance_state_mode()
+    save_money = db.get_current_save_money(default=save_money)
     if not initial_balance_locked:
         balance_state = db.get_balance_state(state_mode)
         if balance_state and balance_state.get('first_balance') is not None:
@@ -1122,8 +1123,10 @@ def ma_strategy(state, manual_action=None):
                         bot_quantity=bot_quantity,
                         position_value=margin * leverage,
                         position_value_no_fee=margin_no_fee * leverage,
-                        trade_amount_percent=account_trade_amount_percent,
+                        trade_amount_percent=trade_amount_percent,
                         fee_rate=fee_rate,
+                        save_money=save_money,
+                        total_assets=balance + margin + save_money,
                     )
 
                     logger.info(
@@ -1327,6 +1330,8 @@ def ma_strategy(state, manual_action=None):
                         balance_without_fee=balance_without_fee,
                         margin=margin,
                         margin_no_fee=margin_no_fee,
+                        save_money=save_money,
+                        total_assets=total_balance,
                         **ledger_metrics,
                     )
                 except Exception as e:
@@ -1525,8 +1530,10 @@ def ma_strategy(state, manual_action=None):
                         bot_quantity=bot_quantity,
                         position_value=margin * leverage,
                         position_value_no_fee=margin_no_fee * leverage,
-                        trade_amount_percent=account_trade_amount_percent,
+                        trade_amount_percent=trade_amount_percent,
                         fee_rate=fee_rate,
+                        save_money=save_money,
+                        total_assets=balance + margin + save_money,
                     )
 
                     logger.info(
@@ -1731,6 +1738,8 @@ def ma_strategy(state, manual_action=None):
                         balance_without_fee=balance_without_fee,
                         margin=margin,
                         margin_no_fee=margin_no_fee,
+                        save_money=save_money,
+                        total_assets=total_balance,
                         **ledger_metrics,
                     )
                 except Exception as e:

@@ -43,39 +43,41 @@ class Database:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol TEXT NOT NULL,
             side TEXT NOT NULL,
-            entry_price REAL,
-            open_time TEXT,
-            close_price REAL,
-            close_time TEXT,
-            position_size REAL,
-            margin REAL,
-            leverage INTEGER,
-            profit REAL,
-            profit_percent REAL,
             status TEXT,
-            balance REAL,
-            balance_without_fee REAL,
-            balance_before_trade REAL,
-            balance_before_trade_no_fee REAL,
-            margin_no_fee REAL,
-            position_size_no_fee REAL,
             current_position TEXT,
             client_order_id TEXT,
             exchange_order_id TEXT,
+            open_time TEXT,
+            close_time TEXT,
+            duration_seconds INTEGER,
+            entry_price REAL,
+            close_price REAL,
+            price_change_percent REAL,
+            leverage INTEGER,
+            trade_amount_percent REAL,
+            margin REAL,
+            margin_no_fee REAL,
+            position_value REAL,
+            position_value_no_fee REAL,
+            position_size REAL,
+            position_size_no_fee REAL,
             bot_quantity REAL,
+            balance_before_trade REAL,
+            balance_before_trade_no_fee REAL,
+            balance REAL,
+            balance_without_fee REAL,
+            balance_after_trade REAL,
+            save_money REAL,
+            total_assets REAL,
+            profit REAL,
+            profit_percent REAL,
             pnl REAL,
             pnl_percent REAL,
             pnl_no_fee REAL,
             entry_fee REAL,
             exit_fee REAL,
             total_fee REAL,
-            fee_rate REAL,
-            balance_after_trade REAL,
-            trade_amount_percent REAL,
-            position_value REAL,
-            position_value_no_fee REAL,
-            duration_seconds INTEGER,
-            price_change_percent REAL
+            fee_rate REAL
         )
         """)
 
@@ -121,6 +123,7 @@ class Database:
 
         # ensure any missing columns are added for older DBs
         self._ensure_order_columns()
+        self._ensure_order_layout()
         self._backfill_order_metrics()
 
     # ---------- INSERT METHODS ----------
@@ -147,7 +150,8 @@ class Database:
                      balance=None, balance_without_fee=None, balance_before_trade=None, balance_before_trade_no_fee=None,
                      margin_no_fee=None, position_size_no_fee=None, current_position=None, client_order_id=None,
                      exchange_order_id=None, bot_quantity=None, position_value=None,
-                     position_value_no_fee=None, trade_amount_percent=None, fee_rate=None):
+                     position_value_no_fee=None, trade_amount_percent=None, fee_rate=None, save_money=None,
+                     total_assets=None):
         # extended insert supporting additional balance and fee-related fields
         self.cursor.execute("""
         INSERT INTO orders (
@@ -155,15 +159,15 @@ class Database:
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
             margin_no_fee, position_size_no_fee, current_position, client_order_id,
             exchange_order_id, bot_quantity, position_value, position_value_no_fee,
-            trade_amount_percent, fee_rate
+            trade_amount_percent, fee_rate, save_money, total_assets
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             symbol, side, entry_price, open_time, position_size, margin, leverage, status,
             balance, balance_without_fee, balance_before_trade, balance_before_trade_no_fee,
             margin_no_fee, position_size_no_fee, current_position, client_order_id,
             exchange_order_id, bot_quantity, position_value, position_value_no_fee,
-            trade_amount_percent, fee_rate
+            trade_amount_percent, fee_rate, save_money, total_assets
         ))
         self.conn.commit()
         return self.cursor.lastrowid
@@ -171,23 +175,24 @@ class Database:
     def update_order_close(self, order_id, close_price, close_time, profit, profit_percent, balance,
                             balance_without_fee, margin, margin_no_fee, status="closed", *, pnl=None,
                             pnl_percent=None, pnl_no_fee=None, entry_fee=None, exit_fee=None,
-                            total_fee=None, fee_rate=None, balance_after_trade=None,
-                            trade_amount_percent=None, position_value=None,
-                            position_value_no_fee=None, duration_seconds=None,
-                            price_change_percent=None):
+                             total_fee=None, fee_rate=None, balance_after_trade=None,
+                             trade_amount_percent=None, position_value=None,
+                             position_value_no_fee=None, duration_seconds=None,
+                             price_change_percent=None, save_money=None, total_assets=None):
         self.cursor.execute("""
         UPDATE orders
         SET close_price = ?, close_time = ?, profit = ?, profit_percent = ?, status = ?, balance = ?,
             balance_without_fee = ?, margin = ?, margin_no_fee = ?, pnl = ?, pnl_percent = ?,
             pnl_no_fee = ?, entry_fee = ?, exit_fee = ?, total_fee = ?, fee_rate = ?,
             balance_after_trade = ?, trade_amount_percent = ?, position_value = ?,
-            position_value_no_fee = ?, duration_seconds = ?, price_change_percent = ?
+            position_value_no_fee = ?, duration_seconds = ?, price_change_percent = ?,
+            save_money = ?, total_assets = ?
         WHERE id = ?
         """, (close_price, close_time, profit, profit_percent, status, balance,
             balance_without_fee, margin, margin_no_fee, pnl, pnl_percent, pnl_no_fee,
             entry_fee, exit_fee, total_fee, fee_rate, balance_after_trade,
             trade_amount_percent, position_value, position_value_no_fee,
-            duration_seconds, price_change_percent, order_id))
+            duration_seconds, price_change_percent, save_money, total_assets, order_id))
         self.conn.commit()
 
     def update_order_execution(self, order_id, exchange_order_id=None, bot_quantity=None):
@@ -257,6 +262,17 @@ class Database:
             balance_without_fee = initial_balance
 
         return balance, balance_without_fee
+
+    def get_current_save_money(self, default=0.0):
+        self.cursor.execute("""
+            SELECT save_money
+            FROM orders
+            WHERE save_money IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+        row = self.cursor.fetchone()
+        return row[0] if row else default
 
 
     # ---------- BALANCE STATE METHODS ----------
@@ -406,6 +422,8 @@ class Database:
             'position_value_no_fee': 'REAL',
             'duration_seconds': 'INTEGER',
             'price_change_percent': 'REAL',
+            'save_money': 'REAL',
+            'total_assets': 'REAL',
         }
         for col, col_type in additions.items():
             if col not in cols:
@@ -414,6 +432,72 @@ class Database:
                     self.conn.commit()
                 except Exception:
                     pass
+
+    def _ensure_order_layout(self):
+        desired_columns = [
+            ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+            ("symbol", "TEXT NOT NULL"),
+            ("side", "TEXT NOT NULL"),
+            ("status", "TEXT"),
+            ("current_position", "TEXT"),
+            ("client_order_id", "TEXT"),
+            ("exchange_order_id", "TEXT"),
+            ("open_time", "TEXT"),
+            ("close_time", "TEXT"),
+            ("duration_seconds", "INTEGER"),
+            ("entry_price", "REAL"),
+            ("close_price", "REAL"),
+            ("price_change_percent", "REAL"),
+            ("leverage", "INTEGER"),
+            ("trade_amount_percent", "REAL"),
+            ("margin", "REAL"),
+            ("margin_no_fee", "REAL"),
+            ("position_value", "REAL"),
+            ("position_value_no_fee", "REAL"),
+            ("position_size", "REAL"),
+            ("position_size_no_fee", "REAL"),
+            ("bot_quantity", "REAL"),
+            ("balance_before_trade", "REAL"),
+            ("balance_before_trade_no_fee", "REAL"),
+            ("balance", "REAL"),
+            ("balance_without_fee", "REAL"),
+            ("balance_after_trade", "REAL"),
+            ("save_money", "REAL"),
+            ("total_assets", "REAL"),
+            ("profit", "REAL"),
+            ("profit_percent", "REAL"),
+            ("pnl", "REAL"),
+            ("pnl_percent", "REAL"),
+            ("pnl_no_fee", "REAL"),
+            ("entry_fee", "REAL"),
+            ("exit_fee", "REAL"),
+            ("total_fee", "REAL"),
+            ("fee_rate", "REAL"),
+        ]
+        current_columns = [row[1] for row in self.cursor.execute("PRAGMA table_info('orders')")]
+        desired_names = [name for name, _ in desired_columns]
+        if current_columns == desired_names:
+            return
+
+        unknown_columns = [name for name in current_columns if name not in desired_names]
+        if unknown_columns:
+            raise RuntimeError(f"Cannot reorder orders table with unknown columns: {unknown_columns}")
+
+        schema = ",\n                ".join(f'"{name}" {definition}' for name, definition in desired_columns)
+        columns_sql = ", ".join(f'"{name}"' for name in desired_names)
+        self.cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self.cursor.execute("DROP TABLE IF EXISTS orders_reordered")
+            self.cursor.execute(f"CREATE TABLE orders_reordered ({schema})")
+            self.cursor.execute(
+                f"INSERT INTO orders_reordered ({columns_sql}) SELECT {columns_sql} FROM orders"
+            )
+            self.cursor.execute("DROP TABLE orders")
+            self.cursor.execute("ALTER TABLE orders_reordered RENAME TO orders")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     @staticmethod
     def _metric_float(value):
