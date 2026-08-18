@@ -309,7 +309,9 @@ BOT_STATE = BotState(
 
 
 def _get_balance_state_mode():
-    return "toobit" if TOOBIT_SYNC_BALANCE else "local"
+    # Live orders must always use the live account's first/tactical balance.
+    # TOOBIT_SYNC_BALANCE only controls dry-run/demo balance synchronization.
+    return "toobit" if (TOOBIT_SYNC_BALANCE or (TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS)) else "local"
 
 
 def _lock_initial_balances(state, source_balance, reason, db=None, mode=None):
@@ -370,10 +372,7 @@ def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=No
         except Exception:
             tactical_balance = None
     if tactical_balance is not None and tactical_balance > 0:
-        if tb_balance >= 50 / 100 * tactical_balance:
-            live_margin = tactical_balance * percent
-        else:
-            live_margin = tb_balance * percent
+        live_margin = min(tb_balance, tactical_balance) * percent
     else:
         live_margin = tb_balance * percent
     return live_margin * leverage
@@ -763,7 +762,7 @@ def ma_strategy(state, manual_action=None):
             if TOOBIT_REFRESH_BALANCE_EACH_CYCLE:
                 tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                 toobit_balance = tb_balance
-                if TOOBIT_SYNC_BALANCE:
+                if TOOBIT_SYNC_BALANCE or (TOOBIT_EXECUTE_ORDERS and order_id is None):
                     balance = tb_balance
                     balance_without_fee = tb_balance
         except Exception as e:
@@ -1070,6 +1069,10 @@ def ma_strategy(state, manual_action=None):
                                     "Toobit LONG opened but executed quantity is not verified yet; "
                                     "live closing will remain disabled until it can be verified."
                                 )
+                            else:
+                                # Use the exchange-filled base quantity for PnL/DB metrics.
+                                updates["position_size"] = float(bot_quantity)
+                                updates["position_value"] = updates["entry_price"] * float(bot_quantity)
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
@@ -1121,8 +1124,8 @@ def ma_strategy(state, manual_action=None):
                         client_order_id=client_order_id,
                         exchange_order_id=exchange_order_id,
                         bot_quantity=bot_quantity,
-                        position_value=margin * leverage,
-                        position_value_no_fee=margin_no_fee * leverage,
+                        position_value=entry_price * position_size,
+                        position_value_no_fee=entry_price * position_size_no_fee,
                         trade_amount_percent=trade_amount_percent,
                         fee_rate=fee_rate,
                         save_money=save_money,
@@ -1477,6 +1480,10 @@ def ma_strategy(state, manual_action=None):
                                     "Toobit SHORT opened but executed quantity is not verified yet; "
                                     "live closing will remain disabled until it can be verified."
                                 )
+                            else:
+                                # Use the exchange-filled base quantity for PnL/DB metrics.
+                                updates["position_size"] = float(bot_quantity)
+                                updates["position_value"] = updates["entry_price"] * float(bot_quantity)
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()
@@ -1528,8 +1535,8 @@ def ma_strategy(state, manual_action=None):
                         client_order_id=client_order_id,
                         exchange_order_id=exchange_order_id,
                         bot_quantity=bot_quantity,
-                        position_value=margin * leverage,
-                        position_value_no_fee=margin_no_fee * leverage,
+                        position_value=entry_price * position_size,
+                        position_value_no_fee=entry_price * position_size_no_fee,
                         trade_amount_percent=trade_amount_percent,
                         fee_rate=fee_rate,
                         save_money=save_money,

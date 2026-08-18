@@ -2,6 +2,57 @@
 from datetime import datetime, timezone
 
 
+def select_leverage(balance, tactical_balance, leverage, safe_low, safe_med, safe_high):
+    """Select leverage from the account drawdown relative to tactical balance."""
+    balance = float(balance)
+    tactical_balance = float(tactical_balance)
+    if tactical_balance <= 0:
+        raise ValueError("tactical_balance must be greater than zero")
+
+    balance_ratio = balance / tactical_balance
+    if balance_ratio <= 0.80:
+        return safe_low
+    if balance_ratio <= 0.85:
+        return safe_med
+    if balance_ratio <= 0.90:
+        return safe_high
+    return leverage
+
+
+def calculate_margin(balance, tactical_balance, trade_amount_percent):
+    """Risk the configured fraction of the smaller current/tactical balance."""
+    balance = float(balance)
+    tactical_balance = float(tactical_balance)
+    trade_amount_percent = float(trade_amount_percent)
+    if balance <= 0 or tactical_balance <= 0 or trade_amount_percent <= 0:
+        return 0.0
+    return min(balance, tactical_balance) * trade_amount_percent
+
+
+def calculate_trade_metrics(
+    side, entry_price, close_price, position_size, margin, fee_rate,
+    balance_before_trade,
+):
+    """Return consistently based gross PnL and net profit metrics."""
+    direction = -1.0 if str(side).strip().lower() in {"short", "sell"} else 1.0
+    pnl = position_size * (close_price - entry_price) * direction
+    entry_fee = entry_price * position_size * fee_rate
+    exit_fee = close_price * position_size * fee_rate
+    total_fee = entry_fee + exit_fee
+    profit = pnl - total_fee
+    pnl_percent = pnl * 100 / margin if margin else 0.0
+    profit_percent = profit * 100 / balance_before_trade if balance_before_trade else 0.0
+    return {
+        "pnl": pnl,
+        "pnl_percent": pnl_percent,
+        "profit": profit,
+        "profit_percent": profit_percent,
+        "entry_fee": entry_fee,
+        "exit_fee": exit_fee,
+        "total_fee": total_fee,
+    }
+
+
 def trade_duration(open_time: str, close_time: str):
     """Return elapsed whole days/hours/minutes for ISO-8601 timestamps."""
 
@@ -67,25 +118,20 @@ class TradeManager:
         balance_before_trade_no_fee = balance_without_fee
 
         # ---------- Margin ----------
-        if balance >= trade_amount_percent * self.tactical_balance:
-            margin = trade_amount_percent * self.tactical_balance
-        else:
-            margin = balance * trade_amount_percent
+        margin = calculate_margin(balance, self.tactical_balance, trade_amount_percent)
         
         # ---------- Leverage ----------
-        if balance <= self.tactical_balance * 80 / 100:
-            leverage = self.safe_leverage_low
-        elif balance <= self.tactical_balance * 85 / 100:
-            leverage = self.safe_leverage_med
-        elif balance <= self.tactical_balance * 90 / 100:
-            leverage = self.safe_leverage_high
-        else:
-            leverage = self.leverage
+        leverage = select_leverage(
+            balance, self.tactical_balance, self.leverage,
+            self.safe_leverage_low, self.safe_leverage_med, self.safe_leverage_high,
+        )
 
         position_value = margin * leverage
         position_size = position_value / entry_price
 
-        margin_no_fee = balance_without_fee * trade_amount_percent
+        margin_no_fee = calculate_margin(
+            balance_without_fee, self.tactical_balance, trade_amount_percent
+        )
         position_value_no_fee = margin_no_fee * leverage
         position_size_no_fee = position_value_no_fee / entry_price
 
@@ -133,23 +179,27 @@ class TradeManager:
         close_price = open_prices
 
         # PnL
-        pnl = position_size * (close_price - entry_price)
+        metrics = calculate_trade_metrics(
+            "long", entry_price, close_price, position_size, margin, fee_rate,
+            balance_before_trade,
+        )
+        pnl = metrics["pnl"]
         pnl_no_fee = position_size_no_fee * (close_price - entry_price)
 
         # Fee like Toobit
-        entry_fee = entry_price * position_size * fee_rate
-        exit_fee = close_price * position_size * fee_rate
-        total_fee = entry_fee + exit_fee
+        entry_fee = metrics["entry_fee"]
+        exit_fee = metrics["exit_fee"]
+        total_fee = metrics["total_fee"]
 
         # Update balance
         balance += margin + pnl - total_fee
         balance_without_fee += margin_no_fee + pnl_no_fee
 
         # profit after fee
-        profit = balance - balance_before_trade
-        profit_percent = profit * 100 / balance_before_trade
+        profit = metrics["profit"]
+        profit_percent = metrics["profit_percent"]
         profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
-        pnl_percent = (pnl / margin) * 100
+        pnl_percent = metrics["pnl_percent"]
         balance_after_trade = balance
         position_value = entry_price * position_size
         position_value_no_fee = entry_price * position_size_no_fee
@@ -288,25 +338,20 @@ class TradeManager:
         balance_before_trade_no_fee = balance_without_fee
 
         # ---------- Margin ----------
-        if balance >= trade_amount_percent * self.tactical_balance:
-            margin = trade_amount_percent * self.tactical_balance
-        else:
-            margin = balance * trade_amount_percent
+        margin = calculate_margin(balance, self.tactical_balance, trade_amount_percent)
 
         # ---------- Leverage ----------
-        if balance <= self.tactical_balance * 80 / 100:
-            leverage = self.safe_leverage_low
-        elif balance <= self.tactical_balance * 85 / 100:
-            leverage = self.safe_leverage_med
-        elif balance <= self.tactical_balance * 90 / 100:
-            leverage = self.safe_leverage_high
-        else:
-            leverage = self.leverage
+        leverage = select_leverage(
+            balance, self.tactical_balance, self.leverage,
+            self.safe_leverage_low, self.safe_leverage_med, self.safe_leverage_high,
+        )
 
         position_value = margin * leverage
         position_size = position_value / entry_price
 
-        margin_no_fee = balance_without_fee * trade_amount_percent
+        margin_no_fee = calculate_margin(
+            balance_without_fee, self.tactical_balance, trade_amount_percent
+        )
         position_value_no_fee = margin_no_fee * leverage
         position_size_no_fee = position_value_no_fee / entry_price
 
@@ -354,23 +399,27 @@ class TradeManager:
         close_price = open_prices
 
         # PnL
-        pnl = position_size * (entry_price - close_price)
+        metrics = calculate_trade_metrics(
+            "short", entry_price, close_price, position_size, margin, fee_rate,
+            balance_before_trade,
+        )
+        pnl = metrics["pnl"]
         pnl_no_fee = position_size_no_fee * (entry_price - close_price)
 
         # Fee like Toobit
-        entry_fee = entry_price * position_size * fee_rate
-        exit_fee = close_price * position_size * fee_rate
-        total_fee = entry_fee + exit_fee
+        entry_fee = metrics["entry_fee"]
+        exit_fee = metrics["exit_fee"]
+        total_fee = metrics["total_fee"]
 
         # Update balance
         balance += margin + pnl - total_fee
         balance_without_fee += margin_no_fee + pnl_no_fee
 
         # profit after fee
-        profit = balance - balance_before_trade
-        profit_percent = profit * 100 / balance_before_trade
+        profit = metrics["profit"]
+        profit_percent = metrics["profit_percent"]
         profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
-        pnl_percent = (pnl / margin) * 100
+        pnl_percent = metrics["pnl_percent"]
         balance_after_trade = balance
         position_value = entry_price * position_size
         position_value_no_fee = entry_price * position_size_no_fee

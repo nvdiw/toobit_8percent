@@ -534,7 +534,7 @@ class Database:
         self.cursor.execute("""
             SELECT id, side, entry_price, close_price, open_time, close_time,
                    position_size, position_size_no_fee, margin, leverage,
-                   profit, balance_before_trade, pnl, pnl_percent, pnl_no_fee,
+                   profit, profit_percent, balance_before_trade, pnl, pnl_percent, pnl_no_fee,
                    entry_fee, exit_fee, total_fee, fee_rate, balance_after_trade,
                    trade_amount_percent, position_value, position_value_no_fee,
                    duration_seconds, price_change_percent
@@ -545,7 +545,7 @@ class Database:
             (
                 order_id, side, entry_price, close_price, open_time, close_time,
                 position_size, position_size_no_fee, margin, leverage, profit,
-                balance_before, stored_pnl, stored_pnl_percent, stored_pnl_no_fee,
+                stored_profit_percent, balance_before, stored_pnl, stored_pnl_percent, stored_pnl_no_fee,
                 stored_entry_fee, stored_exit_fee, stored_total_fee, stored_fee_rate,
                 stored_balance_after, stored_trade_percent, stored_position_value,
                 stored_position_value_no_fee, stored_duration, stored_price_change,
@@ -561,22 +561,21 @@ class Database:
             direction = -1.0 if str(side or "").strip().lower() in {"short", "sell"} else 1.0
 
             position_value = self._metric_float(stored_position_value)
-            if position_value is None:
-                if entry is not None and size is not None:
-                    position_value = entry * size
-                elif used_margin is not None and used_leverage is not None:
-                    position_value = used_margin * used_leverage
+            if entry is not None and size is not None:
+                position_value = entry * size
+            elif position_value is None and used_margin is not None and used_leverage is not None:
+                position_value = used_margin * used_leverage
             position_value_no_fee = self._metric_float(stored_position_value_no_fee)
-            if position_value_no_fee is None and entry is not None and size_no_fee is not None:
+            if entry is not None and size_no_fee is not None:
                 position_value_no_fee = entry * size_no_fee
             pnl = self._metric_float(stored_pnl)
-            if pnl is None and None not in (entry, close, size):
+            if None not in (entry, close, size):
                 pnl = size * (close - entry) * direction
             pnl_no_fee = self._metric_float(stored_pnl_no_fee)
-            if pnl_no_fee is None and None not in (entry, close, size_no_fee):
+            if None not in (entry, close, size_no_fee):
                 pnl_no_fee = size_no_fee * (close - entry) * direction
             pnl_percent = self._metric_float(stored_pnl_percent)
-            if pnl_percent is None and pnl is not None and used_margin:
+            if pnl is not None and used_margin:
                 pnl_percent = pnl * 100 / used_margin
             total_fee = self._metric_float(stored_total_fee)
             if total_fee is None and pnl is not None and net_profit is not None:
@@ -593,6 +592,11 @@ class Database:
             exit_fee = self._metric_float(stored_exit_fee)
             if exit_fee is None and fee_rate is not None and exit_notional is not None:
                 exit_fee = exit_notional * fee_rate
+            if pnl is not None and total_fee is not None:
+                net_profit = pnl - total_fee
+            profit_percent = self._metric_float(stored_profit_percent)
+            if net_profit is not None and before:
+                profit_percent = net_profit * 100 / before
             balance_after = self._metric_float(stored_balance_after)
             if balance_after is None and before is not None and net_profit is not None:
                 balance_after = before + net_profit
@@ -601,23 +605,24 @@ class Database:
                 trade_percent = used_margin / before
             duration = stored_duration if stored_duration is not None else self._metric_duration_seconds(open_time, close_time)
             price_change = self._metric_float(stored_price_change)
-            if price_change is None and entry and close is not None:
+            if entry and close is not None:
                 price_change = (close - entry) * direction * 100 / entry
 
             self.cursor.execute("""
                 UPDATE orders
-                SET pnl = COALESCE(pnl, ?), pnl_percent = COALESCE(pnl_percent, ?),
-                    pnl_no_fee = COALESCE(pnl_no_fee, ?), entry_fee = COALESCE(entry_fee, ?),
+                SET profit = COALESCE(?, profit), profit_percent = COALESCE(?, profit_percent),
+                    pnl = COALESCE(?, pnl), pnl_percent = COALESCE(?, pnl_percent),
+                    pnl_no_fee = COALESCE(?, pnl_no_fee), entry_fee = COALESCE(entry_fee, ?),
                     exit_fee = COALESCE(exit_fee, ?), total_fee = COALESCE(total_fee, ?),
                     fee_rate = COALESCE(fee_rate, ?), balance_after_trade = COALESCE(balance_after_trade, ?),
                     trade_amount_percent = COALESCE(trade_amount_percent, ?),
-                    position_value = COALESCE(position_value, ?),
-                    position_value_no_fee = COALESCE(position_value_no_fee, ?),
+                    position_value = COALESCE(?, position_value),
+                    position_value_no_fee = COALESCE(?, position_value_no_fee),
                     duration_seconds = COALESCE(duration_seconds, ?),
-                    price_change_percent = COALESCE(price_change_percent, ?)
+                    price_change_percent = COALESCE(?, price_change_percent)
                 WHERE id = ?
             """, (
-                pnl, pnl_percent, pnl_no_fee, entry_fee, exit_fee, total_fee,
+                net_profit, profit_percent, pnl, pnl_percent, pnl_no_fee, entry_fee, exit_fee, total_fee,
                 fee_rate, balance_after, trade_percent, position_value,
                 position_value_no_fee, duration, price_change, order_id,
             ))
