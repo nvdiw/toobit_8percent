@@ -105,9 +105,18 @@ class Database:
             consecutive_losses INTEGER,
             trade_power INTEGER,
             trade_power_locked_month TEXT,
+            profit_percent_per_month REAL,
             updated_at TEXT
         )
         """)
+
+        runtime_columns = {
+            row[1] for row in self.cursor.execute("PRAGMA table_info(runtime_state)").fetchall()
+        }
+        if "profit_percent_per_month" not in runtime_columns:
+            self.cursor.execute(
+                "ALTER TABLE runtime_state ADD COLUMN profit_percent_per_month REAL"
+            )
 
         self.conn.commit()
 
@@ -321,7 +330,8 @@ class Database:
 
     def get_runtime_state(self, mode):
         self.cursor.execute("""
-            SELECT last_trade_cross_time, skip_trades_left, consecutive_losses, trade_power, trade_power_locked_month
+            SELECT last_trade_cross_time, skip_trades_left, consecutive_losses, trade_power,
+                   trade_power_locked_month, profit_percent_per_month
             FROM runtime_state
             WHERE mode = ?
             LIMIT 1
@@ -335,6 +345,7 @@ class Database:
             'consecutive_losses': row[2],
             'trade_power': row[3],
             'trade_power_locked_month': row[4],
+            'profit_percent_per_month': row[5],
         }
 
     def set_runtime_state(
@@ -345,6 +356,7 @@ class Database:
         consecutive_losses=0,
         trade_power=1,
         trade_power_locked_month=None,
+        profit_percent_per_month=0.0,
         updated_at=None,
     ):
         if updated_at is None:
@@ -363,7 +375,8 @@ class Database:
             self.cursor.execute("""
                 UPDATE runtime_state
                 SET last_trade_cross_time = ?, skip_trades_left = ?, consecutive_losses = ?,
-                    trade_power = ?, trade_power_locked_month = ?, updated_at = ?
+                    trade_power = ?, trade_power_locked_month = ?,
+                    profit_percent_per_month = ?, updated_at = ?
                 WHERE mode = ?
             """, (
                 last_trade_cross_time,
@@ -371,6 +384,7 @@ class Database:
                 int(consecutive_losses) if consecutive_losses is not None else 0,
                 int(trade_power) if trade_power is not None else 1,
                 trade_power_locked_month,
+                float(profit_percent_per_month or 0),
                 updated_at,
                 mode,
             ))
@@ -378,9 +392,9 @@ class Database:
             self.cursor.execute("""
                 INSERT INTO runtime_state (
                     mode, last_trade_cross_time, skip_trades_left, consecutive_losses,
-                    trade_power, trade_power_locked_month, updated_at
+                    trade_power, trade_power_locked_month, profit_percent_per_month, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 mode,
                 last_trade_cross_time,
@@ -388,6 +402,7 @@ class Database:
                 int(consecutive_losses) if consecutive_losses is not None else 0,
                 int(trade_power) if trade_power is not None else 1,
                 trade_power_locked_month,
+                float(profit_percent_per_month or 0),
                 updated_at,
             ))
 
@@ -532,23 +547,24 @@ class Database:
 
     def _backfill_order_metrics(self):
         self.cursor.execute("""
-            SELECT id, side, entry_price, close_price, open_time, close_time,
+            SELECT id, status, side, entry_price, close_price, open_time, close_time,
                    position_size, position_size_no_fee, margin, leverage,
                    profit, profit_percent, balance_before_trade, pnl, pnl_percent, pnl_no_fee,
                    entry_fee, exit_fee, total_fee, fee_rate, balance_after_trade,
                    trade_amount_percent, position_value, position_value_no_fee,
-                   duration_seconds, price_change_percent
+                   duration_seconds, price_change_percent, balance, save_money, total_assets
             FROM orders
         """)
         rows = self.cursor.fetchall()
         for row in rows:
             (
-                order_id, side, entry_price, close_price, open_time, close_time,
+                order_id, status, side, entry_price, close_price, open_time, close_time,
                 position_size, position_size_no_fee, margin, leverage, profit,
                 stored_profit_percent, balance_before, stored_pnl, stored_pnl_percent, stored_pnl_no_fee,
                 stored_entry_fee, stored_exit_fee, stored_total_fee, stored_fee_rate,
                 stored_balance_after, stored_trade_percent, stored_position_value,
                 stored_position_value_no_fee, stored_duration, stored_price_change,
+                stored_balance, stored_save_money, stored_total_assets,
             ) = row
             entry = self._metric_float(entry_price)
             close = self._metric_float(close_price)
@@ -578,8 +594,6 @@ class Database:
             if pnl is not None and used_margin:
                 pnl_percent = pnl * 100 / used_margin
             total_fee = self._metric_float(stored_total_fee)
-            if total_fee is None and pnl is not None and net_profit is not None:
-                total_fee = max(0.0, pnl - net_profit)
             fee_rate = self._metric_float(stored_fee_rate)
             entry_notional = entry * size if None not in (entry, size) else None
             exit_notional = close * size if None not in (close, size) else None
@@ -587,44 +601,73 @@ class Database:
                 denominator = entry_notional + exit_notional
                 fee_rate = total_fee / denominator if denominator else None
             entry_fee = self._metric_float(stored_entry_fee)
-            if entry_fee is None and fee_rate is not None and entry_notional is not None:
+            if fee_rate is not None and entry_notional is not None:
                 entry_fee = entry_notional * fee_rate
             exit_fee = self._metric_float(stored_exit_fee)
-            if exit_fee is None and fee_rate is not None and exit_notional is not None:
+            if fee_rate is not None and exit_notional is not None:
                 exit_fee = exit_notional * fee_rate
+            if entry_fee is not None and exit_fee is not None:
+                total_fee = entry_fee + exit_fee
+            elif total_fee is None and pnl is not None and net_profit is not None:
+                total_fee = max(0.0, pnl - net_profit)
             if pnl is not None and total_fee is not None:
                 net_profit = pnl - total_fee
             profit_percent = self._metric_float(stored_profit_percent)
             if net_profit is not None and before:
                 profit_percent = net_profit * 100 / before
             balance_after = self._metric_float(stored_balance_after)
-            if balance_after is None and before is not None and net_profit is not None:
+            if before is not None and net_profit is not None:
                 balance_after = before + net_profit
             trade_percent = self._metric_float(stored_trade_percent)
             if trade_percent is None and used_margin is not None and before:
                 trade_percent = used_margin / before
-            duration = stored_duration if stored_duration is not None else self._metric_duration_seconds(open_time, close_time)
+            duration = self._metric_duration_seconds(open_time, close_time)
             price_change = self._metric_float(stored_price_change)
             if entry and close is not None:
                 price_change = (close - entry) * direction * 100 / entry
+
+            active_balance = self._metric_float(stored_balance)
+            save_money = self._metric_float(stored_save_money)
+            total_assets = self._metric_float(stored_total_assets)
+            if str(status or "").strip().lower() == "closed" and active_balance is not None:
+                if save_money is not None and abs(save_money) < 1e-8:
+                    save_money = 0.0
+                if save_money is None:
+                    asset_difference = (
+                        total_assets - active_balance if total_assets is not None else None
+                    )
+                    if asset_difference is not None and asset_difference >= -1e-8:
+                        save_money = max(0.0, asset_difference)
+                    elif balance_after is not None and balance_after >= active_balance:
+                        save_money = balance_after - active_balance
+                    else:
+                        save_money = 0.0
+                if (
+                    total_assets is not None
+                    and not save_money
+                    and total_assets - active_balance > 1e-8
+                ):
+                    save_money = total_assets - active_balance
+                total_assets = active_balance + save_money
 
             self.cursor.execute("""
                 UPDATE orders
                 SET profit = COALESCE(?, profit), profit_percent = COALESCE(?, profit_percent),
                     pnl = COALESCE(?, pnl), pnl_percent = COALESCE(?, pnl_percent),
-                    pnl_no_fee = COALESCE(?, pnl_no_fee), entry_fee = COALESCE(entry_fee, ?),
-                    exit_fee = COALESCE(exit_fee, ?), total_fee = COALESCE(total_fee, ?),
-                    fee_rate = COALESCE(fee_rate, ?), balance_after_trade = COALESCE(balance_after_trade, ?),
+                    pnl_no_fee = COALESCE(?, pnl_no_fee), entry_fee = COALESCE(?, entry_fee),
+                    exit_fee = COALESCE(?, exit_fee), total_fee = COALESCE(?, total_fee),
+                    fee_rate = COALESCE(fee_rate, ?), balance_after_trade = COALESCE(?, balance_after_trade),
                     trade_amount_percent = COALESCE(trade_amount_percent, ?),
                     position_value = COALESCE(?, position_value),
                     position_value_no_fee = COALESCE(?, position_value_no_fee),
-                    duration_seconds = COALESCE(duration_seconds, ?),
-                    price_change_percent = COALESCE(?, price_change_percent)
+                    duration_seconds = COALESCE(?, duration_seconds),
+                    price_change_percent = COALESCE(?, price_change_percent),
+                    save_money = COALESCE(?, save_money), total_assets = COALESCE(?, total_assets)
                 WHERE id = ?
             """, (
                 net_profit, profit_percent, pnl, pnl_percent, pnl_no_fee, entry_fee, exit_fee, total_fee,
                 fee_rate, balance_after, trade_percent, position_value,
-                position_value_no_fee, duration, price_change, order_id,
+                position_value_no_fee, duration, price_change, save_money, total_assets, order_id,
             ))
         self.conn.commit()
 

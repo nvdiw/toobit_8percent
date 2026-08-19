@@ -80,6 +80,11 @@ def trade_duration(open_time: str, close_time: str):
     return days, hours, minutes
 
 
+def accumulate_monthly_profit_percent(current_percent, trade_profit_percent):
+    """Track strategy returns without mixing them with unallocated account cash."""
+    return float(current_percent or 0) + float(trade_profit_percent or 0)
+
+
 # Trade manager class to encapsulate open/close logic without changing behavior
 class TradeManager:
     def __init__(
@@ -198,7 +203,10 @@ class TradeManager:
         # profit after fee
         profit = metrics["profit"]
         profit_percent = metrics["profit_percent"]
-        profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
+        profit_percent_per_month = accumulate_monthly_profit_percent(
+            profit_percent_per_month,
+            profit_percent,
+        )
         pnl_percent = metrics["pnl_percent"]
         balance_after_trade = balance
         position_value = entry_price * position_size
@@ -418,7 +426,10 @@ class TradeManager:
         # profit after fee
         profit = metrics["profit"]
         profit_percent = metrics["profit_percent"]
-        profit_percent_per_month = ((balance * 100) / self.tactical_balance) - 100
+        profit_percent_per_month = accumulate_monthly_profit_percent(
+            profit_percent_per_month,
+            profit_percent,
+        )
         pnl_percent = metrics["pnl_percent"]
         balance_after_trade = balance
         position_value = entry_price * position_size

@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 
 from database import Database
-from trademanager import calculate_margin, calculate_trade_metrics, select_leverage
+from trademanager import (
+    accumulate_monthly_profit_percent,
+    calculate_margin,
+    calculate_trade_metrics,
+    select_leverage,
+)
 
 
 class TradeRiskTests(unittest.TestCase):
@@ -18,6 +23,10 @@ class TradeRiskTests(unittest.TestCase):
         self.assertEqual(calculate_margin(1000, 1000, 0.5), 500)
         self.assertEqual(calculate_margin(900, 1000, 0.5), 450)
         self.assertEqual(calculate_margin(1100, 1000, 0.5), 500)
+
+    def test_monthly_profit_accumulates_trade_returns_not_account_cash(self):
+        monthly_return = accumulate_monthly_profit_percent(-16.19, 3.41)
+        self.assertAlmostEqual(monthly_return, -12.78)
 
 
 class TradeMetricTests(unittest.TestCase):
@@ -54,16 +63,41 @@ class TradeMetricTests(unittest.TestCase):
 
             repaired = Database(str(db_path))
             repaired.cursor.execute(
-                "SELECT profit, profit_percent, pnl, pnl_percent FROM orders WHERE id = ?",
+                "SELECT profit, profit_percent, pnl, pnl_percent, total_fee, "
+                "balance_after_trade, save_money, total_assets FROM orders WHERE id = ?",
                 (order_id,),
             )
-            profit, profit_percent, pnl, pnl_percent = repaired.cursor.fetchone()
+            (
+                profit, profit_percent, pnl, pnl_percent, total_fee,
+                balance_after, save_money, total_assets,
+            ) = repaired.cursor.fetchone()
             repaired.close()
 
             self.assertAlmostEqual(pnl, 50)
             self.assertAlmostEqual(pnl_percent, 100)
             self.assertAlmostEqual(profit, 48.95)
             self.assertAlmostEqual(profit_percent, 4.895)
+            self.assertAlmostEqual(total_fee, 1.05)
+            self.assertAlmostEqual(balance_after, 1048.95)
+            self.assertAlmostEqual(save_money, 0)
+            self.assertAlmostEqual(total_assets, 1048.95)
+
+    def test_monthly_profit_survives_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "runtime.db"
+            db = Database(str(db_path))
+            db.set_runtime_state(
+                mode="toobit",
+                trade_power=1,
+                profit_percent_per_month=-12.7665,
+            )
+            db.close()
+
+            reopened = Database(str(db_path))
+            runtime = reopened.get_runtime_state("toobit")
+            reopened.close()
+
+            self.assertAlmostEqual(runtime["profit_percent_per_month"], -12.7665)
 
 
 if __name__ == "__main__":

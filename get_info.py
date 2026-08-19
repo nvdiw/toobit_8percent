@@ -440,7 +440,9 @@ def _find_entry_index(close_times, open_time):
     return None
 
 
-def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month):
+def _save_runtime_state(
+    db, mode, last_cross, skips, losses, power, locked_month, monthly_profit
+):
     try:
         db.set_runtime_state(
             mode=mode,
@@ -449,6 +451,7 @@ def _save_runtime_state(db, mode, last_cross, skips, losses, power, locked_month
             consecutive_losses=int(losses) if losses is not None else 0,
             trade_power=1 if power else 0,
             trade_power_locked_month=locked_month,
+            profit_percent_per_month=monthly_profit,
         )
     except Exception as e:
         logger.exception(f"set_runtime_state failed: {e}")
@@ -696,6 +699,9 @@ def ma_strategy(state, manual_action=None):
                 consecutive_losses = 0
             trade_power = bool(rstate.get("trade_power")) if rstate.get("trade_power") is not None else True
             trade_power_locked_month = rstate.get("trade_power_locked_month")
+            stored_monthly_profit = rstate.get("profit_percent_per_month")
+            if stored_monthly_profit is not None:
+                profit_percent_per_month = float(stored_monthly_profit)
         runtime_state_loaded = True
 
     # sync the latest (required_candles - 1) closed candles so missed rows are backfilled after outages
@@ -902,6 +908,7 @@ def ma_strategy(state, manual_action=None):
                 consecutive_losses,
                 trade_power,
                 trade_power_locked_month,
+                profit_percent_per_month,
             )
         if (
             trade_power_locked_month is not None
@@ -926,6 +933,7 @@ def ma_strategy(state, manual_action=None):
             consecutive_losses,
             trade_power,
             trade_power_locked_month,
+            profit_percent_per_month,
         )
         _persist_state()
         return
@@ -1779,6 +1787,7 @@ def ma_strategy(state, manual_action=None):
         consecutive_losses,
         trade_power,
         trade_power_locked_month,
+        profit_percent_per_month,
     )
     _persist_state()
 
