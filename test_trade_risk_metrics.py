@@ -4,6 +4,7 @@ from pathlib import Path
 
 from database import Database
 from trademanager import (
+    TradeManager,
     accumulate_monthly_profit_percent,
     calculate_margin,
     calculate_trade_metrics,
@@ -18,6 +19,35 @@ class TradeRiskTests(unittest.TestCase):
         self.assertEqual(select_leverage(900, 1000, *args), 4)
         self.assertEqual(select_leverage(850, 1000, *args), 3)
         self.assertEqual(select_leverage(800, 1000, *args), 2)
+
+    def test_demo_margin_and_live_leverage_use_separate_tactical_balances(self):
+        manager = TradeManager(
+            csv_logger=None,
+            first_balance=1000,
+            monthly_profit_percent_stop_trade=8,
+            tactical_balance=1030,
+            monthly_close_filter=True,
+            monthly_compound=3,
+            leverage=10,
+            safe_leverage_low=2,
+            safe_leverage_med=3,
+            safe_leverage_high=4,
+            leverage_balance=470.75,
+            leverage_tactical_balance=550,
+        )
+        opened = manager.open_long(
+            71300.01,
+            "2026-08-20T08:15:00+00:00",
+            balance=983.279073,
+            balance_without_fee=1037.20913,
+            first_balance=1000,
+            trade_amount_percent=0.5,
+            margin_balance=983.279073,
+            leverage=10,
+        )
+
+        self.assertEqual(opened["margin"], 515)
+        self.assertEqual(opened["leverage"], 4)
 
     def test_margin_falls_with_balance(self):
         self.assertEqual(calculate_margin(1000, 1000, 0.5), 500)

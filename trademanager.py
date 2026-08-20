@@ -99,6 +99,8 @@ class TradeManager:
         safe_leverage_low,
         safe_leverage_med,
         safe_leverage_high,
+        leverage_balance=None,
+        leverage_tactical_balance=None,
     ):
         self.csv_logger = csv_logger
         self.first_balance = first_balance
@@ -110,6 +112,24 @@ class TradeManager:
         self.safe_leverage_low = safe_leverage_low
         self.safe_leverage_med = safe_leverage_med
         self.safe_leverage_high = safe_leverage_high
+        self.leverage_balance = leverage_balance
+        self.leverage_tactical_balance = leverage_tactical_balance
+
+    def _select_leverage(self, fallback_balance):
+        risk_balance = (
+            fallback_balance
+            if self.leverage_balance is None
+            else self.leverage_balance
+        )
+        risk_tactical = (
+            self.tactical_balance
+            if self.leverage_tactical_balance is None
+            else self.leverage_tactical_balance
+        )
+        return select_leverage(
+            risk_balance, risk_tactical, self.leverage,
+            self.safe_leverage_low, self.safe_leverage_med, self.safe_leverage_high,
+        )
 
 
     # open long processes
@@ -126,10 +146,7 @@ class TradeManager:
         margin = calculate_margin(balance, self.tactical_balance, trade_amount_percent)
         
         # ---------- Leverage ----------
-        leverage = select_leverage(
-            balance, self.tactical_balance, self.leverage,
-            self.safe_leverage_low, self.safe_leverage_med, self.safe_leverage_high,
-        )
+        leverage = self._select_leverage(balance)
 
         position_value = margin * leverage
         position_size = position_value / entry_price
@@ -349,10 +366,7 @@ class TradeManager:
         margin = calculate_margin(balance, self.tactical_balance, trade_amount_percent)
 
         # ---------- Leverage ----------
-        leverage = select_leverage(
-            balance, self.tactical_balance, self.leverage,
-            self.safe_leverage_low, self.safe_leverage_med, self.safe_leverage_high,
-        )
+        leverage = self._select_leverage(balance)
 
         position_value = margin * leverage
         position_size = position_value / entry_price

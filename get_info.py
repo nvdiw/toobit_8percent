@@ -379,6 +379,23 @@ def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=No
     return live_margin * leverage
 
 
+def _warn_if_unowned_remote_position():
+    """Warn when another live position exists, without blocking execution."""
+    positions = TOOBIT_CLIENT.get_positions(symbol=TOOBIT_SYMBOL)
+    for position in positions:
+        try:
+            quantity = float(position.get("position", 0) or 0)
+        except (TypeError, ValueError):
+            quantity = 0
+        if quantity > 0:
+            logger.warning(
+                "A Toobit position already exists without a bot-owned local order; "
+                "live execution is continuing because this check is warning-only."
+            )
+            return True
+    return False
+
+
 def init_toobit_balance(state):
     state.toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
     if TOOBIT_SYNC_BALANCE:
@@ -865,6 +882,16 @@ def ma_strategy(state, manual_action=None):
         safe_leverage_low,
         safe_leverage_med,
         safe_leverage_high,
+        leverage_balance=(
+            toobit_balance
+            if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS
+            else balance
+        ),
+        leverage_tactical_balance=(
+            toobit_tactical_balance
+            if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS
+            else tactical_balance
+        ),
     )
 
     # ----- Detect last EMA16 / MA50 cross inside fetched window -----
@@ -1056,6 +1083,7 @@ def ma_strategy(state, manual_action=None):
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
+                            _warn_if_unowned_remote_position()
                             if toobit_balance is None:
                                 toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
@@ -1479,6 +1507,7 @@ def ma_strategy(state, manual_action=None):
 
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
+                            _warn_if_unowned_remote_position()
                             if toobit_balance is None:
                                 toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
