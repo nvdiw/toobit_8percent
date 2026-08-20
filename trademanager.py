@@ -20,13 +20,13 @@ def select_leverage(balance, tactical_balance, leverage, safe_low, safe_med, saf
 
 
 def calculate_margin(balance, tactical_balance, trade_amount_percent):
-    """Risk the configured fraction of the smaller current/tactical balance."""
+    """Risk a fraction of tactical capital, capped by available balance."""
     balance = float(balance)
     tactical_balance = float(tactical_balance)
     trade_amount_percent = float(trade_amount_percent)
     if balance <= 0 or tactical_balance <= 0 or trade_amount_percent <= 0:
         return 0.0
-    return min(balance, tactical_balance) * trade_amount_percent
+    return min(balance, tactical_balance * trade_amount_percent)
 
 
 def calculate_trade_metrics(

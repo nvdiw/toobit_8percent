@@ -309,9 +309,10 @@ BOT_STATE = BotState(
 
 
 def _get_balance_state_mode():
-    # Live orders must always use the live account's first/tactical balance.
-    # TOOBIT_SYNC_BALANCE only controls dry-run/demo balance synchronization.
-    return "toobit" if (TOOBIT_SYNC_BALANCE or (TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS)) else "local"
+    # Strategy/demo accounting stays independent from the exchange account.
+    # Live order sizing uses the separate toobit_balance/toobit_tactical_balance
+    # fields below.  Only an explicit sync setting may replace the demo ledger.
+    return "toobit" if TOOBIT_SYNC_BALANCE else "local"
 
 
 def _lock_initial_balances(state, source_balance, reason, db=None, mode=None):
@@ -372,7 +373,7 @@ def _calc_live_value_quantity(tb_balance, percent, leverage, tactical_balance=No
         except Exception:
             tactical_balance = None
     if tactical_balance is not None and tactical_balance > 0:
-        live_margin = min(tb_balance, tactical_balance) * percent
+        live_margin = min(tb_balance, tactical_balance * percent)
     else:
         live_margin = tb_balance * percent
     return live_margin * leverage
@@ -754,6 +755,14 @@ def ma_strategy(state, manual_action=None):
             margin_no_fee = open_order.get('margin_no_fee')
         if open_order.get('position_size_no_fee') is not None:
             position_size_no_fee = open_order.get('position_size_no_fee')
+        # Older live rows may contain Toobit contract count in position_size,
+        # while position_size_no_fee retains the strategy's BTC/demo size.
+        if position_size_no_fee not in (None, 0) and (
+            position_size in (None, 0)
+            or float(position_size) > float(position_size_no_fee) * 10
+            or float(position_size_no_fee) > float(position_size) * 10
+        ):
+            position_size = float(position_size_no_fee)
         if open_order.get('current_position') is not None:
             current_position = open_order.get('current_position')
 
@@ -768,7 +777,7 @@ def ma_strategy(state, manual_action=None):
             if TOOBIT_REFRESH_BALANCE_EACH_CYCLE:
                 tb_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                 toobit_balance = tb_balance
-                if TOOBIT_SYNC_BALANCE or (TOOBIT_EXECUTE_ORDERS and order_id is None):
+                if TOOBIT_SYNC_BALANCE:
                     balance = tb_balance
                     balance_without_fee = tb_balance
         except Exception as e:
@@ -1057,6 +1066,9 @@ def ma_strategy(state, manual_action=None):
                             )
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
+                            contract_multiplier = TOOBIT_CLIENT.get_contract_multiplier(
+                                TOOBIT_SYMBOL
+                            )
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
                             result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
@@ -1078,9 +1090,18 @@ def ma_strategy(state, manual_action=None):
                                     "live closing will remain disabled until it can be verified."
                                 )
                             else:
-                                # Use the exchange-filled base quantity for PnL/DB metrics.
-                                updates["position_size"] = float(bot_quantity)
-                                updates["position_value"] = updates["entry_price"] * float(bot_quantity)
+                                # Toobit's executedQty is a number of futures
+                                # contracts, not a BTC quantity.
+                                base_quantity = float(bot_quantity) * contract_multiplier
+                                updates["position_size"] = base_quantity
+                                updates["position_value"] = updates["entry_price"] * base_quantity
+                                fill_price = TOOBIT_CLIENT.resolve_average_fill_price(
+                                    response=result,
+                                    client_order_id=client_order_id,
+                                )
+                                if fill_price is not None:
+                                    updates["entry_price"] = fill_price
+                                    updates["position_value"] = fill_price * base_quantity
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
@@ -1468,6 +1489,9 @@ def ma_strategy(state, manual_action=None):
                             )
                             if live_value_qty is None:
                                 raise RuntimeError("Cannot size live order from Toobit balance.")
+                            contract_multiplier = TOOBIT_CLIENT.get_contract_multiplier(
+                                TOOBIT_SYMBOL
+                            )
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
                             result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
@@ -1489,9 +1513,18 @@ def ma_strategy(state, manual_action=None):
                                     "live closing will remain disabled until it can be verified."
                                 )
                             else:
-                                # Use the exchange-filled base quantity for PnL/DB metrics.
-                                updates["position_size"] = float(bot_quantity)
-                                updates["position_value"] = updates["entry_price"] * float(bot_quantity)
+                                # Toobit's executedQty is a number of futures
+                                # contracts, not a BTC quantity.
+                                base_quantity = float(bot_quantity) * contract_multiplier
+                                updates["position_size"] = base_quantity
+                                updates["position_value"] = updates["entry_price"] * base_quantity
+                                fill_price = TOOBIT_CLIENT.resolve_average_fill_price(
+                                    response=result,
+                                    client_order_id=client_order_id,
+                                )
+                                if fill_price is not None:
+                                    updates["entry_price"] = fill_price
+                                    updates["position_value"] = fill_price * base_quantity
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()

@@ -258,6 +258,48 @@ class ToobitClient:
             },
         )
 
+    def get_contract_multiplier(self, symbol):
+        """Return the base-asset amount represented by one futures contract."""
+        response = requests.get(
+            f"{self.base_url}/api/v1/exchangeInfo",
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for contract in payload.get("contracts", []):
+            if contract.get("symbol") == symbol:
+                multiplier = float(contract.get("contractMultiplier", 0))
+                if multiplier > 0:
+                    return multiplier
+        raise RuntimeError(f"Contract multiplier not found for {symbol}.")
+
+    def contracts_to_base_quantity(self, symbol, contract_quantity):
+        quantity = float(contract_quantity)
+        if quantity <= 0:
+            raise RuntimeError("Executed contract quantity must be > 0.")
+        return quantity * self.get_contract_multiplier(symbol)
+
+    def resolve_average_fill_price(self, response=None, client_order_id=None):
+        """Resolve the positive average fill price from an order response/query."""
+        details = self.order_details(response)
+        try:
+            price = float(details.get("avgPrice", 0))
+        except (TypeError, ValueError):
+            price = 0.0
+        if price > 0:
+            return price
+        if client_order_id:
+            try:
+                queried = self.get_order(client_order_id=client_order_id)
+            except Exception:
+                return None
+            details = self.order_details(queried)
+            try:
+                price = float(details.get("avgPrice", 0))
+            except (TypeError, ValueError):
+                price = 0.0
+        return price if price > 0 else None
+
     @staticmethod
     def order_details(response):
         if not isinstance(response, dict):

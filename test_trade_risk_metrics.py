@@ -21,7 +21,7 @@ class TradeRiskTests(unittest.TestCase):
 
     def test_margin_falls_with_balance(self):
         self.assertEqual(calculate_margin(1000, 1000, 0.5), 500)
-        self.assertEqual(calculate_margin(900, 1000, 0.5), 450)
+        self.assertEqual(calculate_margin(900, 1000, 0.5), 500)
         self.assertEqual(calculate_margin(1100, 1000, 0.5), 500)
 
     def test_monthly_profit_accumulates_trade_returns_not_account_cash(self):
