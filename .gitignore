@@ -7,6 +7,8 @@ __pycache__/telegram_bot.cpython-313.pyc
 __pycache__/rammonitor.cpython-313.pyc
 __pycache__/database.cpython-313.pyc
 database.db
+database backups/
+logs/
 test2.py
 .env
 __pycache__/env_loader.cpython-313.pyc

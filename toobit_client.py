@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import os
 import time
+from collections import deque
 from urllib.parse import urlencode
 
 import requests
@@ -13,6 +14,8 @@ from database import Database
 class ToobitClient:
     def __init__(
         self,
+        api_key=None,
+        api_secret=None,
         base_url="https://api.toobit.com",
         category="USDT",
         balance_asset="USDT",
@@ -22,6 +25,8 @@ class ToobitClient:
         backoff_base_seconds=1.0,
         max_backoff_seconds=8.0,
     ):
+        self.api_key = api_key.strip() if api_key else None
+        self.api_secret = api_secret.strip() if api_secret else None
         self.base_url = base_url
         self.category = category
         self.balance_asset = balance_asset
@@ -30,7 +35,6 @@ class ToobitClient:
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
         self.max_backoff_seconds = max_backoff_seconds
-        self.db = Database()
 
     def _retry_delay(self, attempt_index):
         delay = self.backoff_base_seconds * (2 ** max(0, attempt_index - 1))
@@ -40,7 +44,11 @@ class ToobitClient:
     def generate_client_order_id(self, strategy):
         strategy = strategy.upper()
 
-        counter = self.db.increment_order_counter(strategy)
+        db = Database()
+        try:
+            counter = db.increment_order_counter(strategy)
+        finally:
+            db.close()
 
         return f"BOT_{strategy}_{counter:06d}"
 
@@ -49,6 +57,9 @@ class ToobitClient:
         return status_code in (408, 429, 500, 502, 503, 504)
 
     def _load_keys(self):
+        if self.api_key and self.api_secret:
+            return self.api_key, self.api_secret
+
         api_key = os.getenv("TOOBIT_API_KEY")
         api_secret = os.getenv("TOOBIT_API_SECRET")
 
@@ -126,7 +137,7 @@ class ToobitClient:
             ) from last_error
         raise RuntimeError("Toobit request failed without a response.")
 
-    def get_balance(self, asset=None):
+    def get_balance_details(self, asset=None):
         asset = asset or self.balance_asset
         data = self._signed_request(
             "GET",
@@ -141,12 +152,139 @@ class ToobitClient:
             raise RuntimeError(f"Unexpected Toobit balance response: {data}")
 
         for item in data:
-            if item.get("asset") == asset:
+            item_asset = item.get("asset") or item.get("coin")
+            if str(item_asset).upper() == str(asset).upper():
                 available = item.get("availableBalance")
                 total = item.get("balance")
-                return float(available if available is not None else total)
+                if total is None and available is None:
+                    raise RuntimeError(f"Toobit returned no balance values for asset {asset}.")
+                total = total if total is not None else available
+                available = available if available is not None else total
+                return {
+                    "total": float(total),
+                    "available": float(available),
+                    "position_margin": float(item.get("positionMargin") or 0),
+                    "order_margin": float(item.get("orderMargin") or 0),
+                    "unrealized_pnl": float(item.get("crossUnRealizedPnl") or 0),
+                }
 
         raise RuntimeError(f"Asset {asset} not found in Toobit balance response.")
+
+    def get_balance(self, asset=None):
+        return self.get_balance_details(asset=asset)["available"]
+
+    def get_available_balance(self, asset=None):
+        return self.get_balance_details(asset=asset)["available"]
+
+    def get_total_balance(self, asset=None):
+        return self.get_balance_details(asset=asset)["total"]
+
+    def _public_get(self, path, params=None):
+        response = requests.get(
+            f"{self.base_url}{path}", params=params or {}, timeout=self.timeout
+        )
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _unwrap_data(payload):
+        if isinstance(payload, dict) and "data" in payload:
+            return payload["data"]
+        return payload
+
+    @staticmethod
+    def _conversion_rate(asset, quote_asset, rates, max_hops=3):
+        asset = str(asset).upper()
+        quote_asset = str(quote_asset).upper()
+        if asset == quote_asset:
+            return 1.0
+        queue = deque([(asset, 1.0, 0)])
+        visited = {asset}
+        while queue:
+            current, rate, hops = queue.popleft()
+            if hops >= max_hops:
+                continue
+            for next_asset, edge_rate in rates.get(current, {}).items():
+                if next_asset in visited:
+                    continue
+                converted = rate * edge_rate
+                if next_asset == quote_asset:
+                    return converted
+                visited.add(next_asset)
+                queue.append((next_asset, converted, hops + 1))
+        return None
+
+    def get_spot_balance_details(self, asset=None):
+        asset = str(asset or self.balance_asset).upper()
+        account = self._unwrap_data(self._signed_request("GET", "/api/v1/account"))
+        balances = account.get("balances", []) if isinstance(account, dict) else []
+        if not isinstance(balances, list):
+            raise RuntimeError(f"Unexpected Toobit spot account response: {account}")
+
+        exchange_info = self._public_get("/api/v1/exchangeInfo")
+        ticker_payload = self._unwrap_data(self._public_get("/quote/v1/ticker/price"))
+        tickers = ticker_payload if isinstance(ticker_payload, list) else []
+        prices = {}
+        for ticker in tickers:
+            symbol = str(ticker.get("s") or ticker.get("symbol") or "").upper()
+            try:
+                price = float(ticker.get("p") or ticker.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if symbol and price > 0:
+                prices[symbol] = price
+
+        rates = {}
+        for market in exchange_info.get("symbols", []) if isinstance(exchange_info, dict) else []:
+            symbol = str(market.get("symbol") or "").upper()
+            base = str(market.get("baseAsset") or "").upper()
+            quote = str(market.get("quoteAsset") or "").upper()
+            price = prices.get(symbol)
+            if not base or not quote or not price:
+                continue
+            rates.setdefault(base, {})[quote] = price
+            rates.setdefault(quote, {})[base] = 1.0 / price
+
+        total_value = available_value = locked_value = 0.0
+        valued_assets = []
+        unpriced_assets = []
+        for row in balances:
+            coin = str(row.get("coin") or row.get("asset") or "").upper()
+            try:
+                total = float(row.get("total") or 0)
+                free = float(row.get("free") or 0)
+                locked = float(row.get("locked") or max(0.0, total - free))
+            except (TypeError, ValueError):
+                continue
+            if total == 0 and free == 0 and locked == 0:
+                continue
+            rate = self._conversion_rate(coin, asset, rates)
+            if rate is None:
+                unpriced_assets.append({"asset": coin, "total": total})
+                continue
+            value = total * rate
+            total_value += value
+            available_value += free * rate
+            locked_value += locked * rate
+            valued_assets.append({"asset": coin, "total": total, "rate": rate, "value": value})
+        return {
+            "asset": asset,
+            "total": total_value,
+            "available": available_value,
+            "locked": locked_value,
+            "assets": valued_assets,
+            "unpriced_assets": unpriced_assets,
+        }
+
+    def get_total_account_balance_details(self, asset=None):
+        futures = self.get_balance_details(asset=asset)
+        spot = self.get_spot_balance_details(asset=asset)
+        return {
+            "total": futures["total"] + spot["total"],
+            "available": futures["available"] + spot["available"],
+            "futures": futures,
+            "spot": spot,
+        }
 
     def get_positions(self, symbol=None, side=None):
         params = {"category": self.category}
@@ -233,12 +371,21 @@ class ToobitClient:
                 raise RuntimeError("Toobit order value_quantity must be > 0.")
             params["valueQuantity"] = self._format_number(val_qty, precision=2)
 
+        mode_label = getattr(self, "mode_label", "FUTURE-TRADE")
+        print(f"[{mode_label}] {side} {symbol}")
         response = self._signed_request(
             "POST",
             "/api/v1/futures/order",
             params=params,
         )
 
+        if not isinstance(response, dict):
+            raise RuntimeError(f"Toobit did not return an order response: {response}")
+        details = self.order_details(response)
+        if str(details.get("status", "")).upper() == "REJECTED":
+            raise RuntimeError(f"Toobit rejected the order: {response}")
+        if not details.get("orderId") and not details.get("clientOrderId"):
+            raise RuntimeError(f"Toobit did not accept the order: {response}")
         response["client_order_id"] = client_order_id
 
         return response

@@ -15,7 +15,7 @@ from database import Database
 from rammonitor import RamMonitor
 from trademanager import TradeManager
 from trade_csv_logger import TradeCSVLogger
-from toobit_client import ToobitClient
+from trade_executor import add_api_trade_argument, get_trade_executor
 from env_loader import load_dotenv_file
 from sync_symbol_data import sync_recent_symbol_data
 from get_ohlcv import get_ohlcv_binance, get_ohlcv_toobit
@@ -88,7 +88,7 @@ TOOBIT_BACKOFF_MAX_SECONDS = 8.0
 TOOBIT_REFRESH_BALANCE_EACH_CYCLE = True
 TOOBIT_SYNC_BALANCE = False  # keep local demo balance if False
 LOCK_FIRST_BALANCE_ON_FIRST_TICK = True  # lock first/tactical balance when first candle is processed
-TOOBIT_CLIENT = ToobitClient(
+TOOBIT_CLIENT = get_trade_executor(
     base_url=TOOBIT_BASE_URL,
     category=TOOBIT_CATEGORY,
     balance_asset=TOOBIT_BALANCE_ASSET,
@@ -397,6 +397,8 @@ def _warn_if_unowned_remote_position():
 
 
 def init_toobit_balance(state):
+    if hasattr(TOOBIT_CLIENT, "validate_connection"):
+        TOOBIT_CLIENT.validate_connection()
     state.toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
     if TOOBIT_SYNC_BALANCE:
         state.balance = state.toobit_balance
@@ -1884,6 +1886,8 @@ parser.add_argument(
     help="Enable a test Bot with out using time filter"
 )
 
+add_api_trade_argument(parser)
+
 manual_group = parser.add_mutually_exclusive_group()
 manual_group.add_argument(
     "--open_long",
@@ -1907,6 +1911,19 @@ manual_group.add_argument(
 )
 
 args = parser.parse_args()
+print(f"API Trade Mode: {args.api_trade.upper().replace('-', ' ')}")
+TOOBIT_CLIENT = get_trade_executor(
+    args.api_trade,
+    base_url=TOOBIT_BASE_URL,
+    category=TOOBIT_CATEGORY,
+    balance_asset=TOOBIT_BALANCE_ASSET,
+    recv_window=TOOBIT_RECV_WINDOW,
+    timeout=TOOBIT_TIMEOUT_SECONDS,
+    max_retries=TOOBIT_MAX_RETRIES,
+    backoff_base_seconds=TOOBIT_BACKOFF_BASE_SECONDS,
+    max_backoff_seconds=TOOBIT_BACKOFF_MAX_SECONDS,
+)
+BOT_STATE.api_trade = args.api_trade
 
 # you can turn on to see bot ram usage:  ----> True/False
 # ================= RAM MONITOR =================
