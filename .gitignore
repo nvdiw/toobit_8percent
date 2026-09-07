@@ -38,3 +38,7 @@ logs/trade.log.2026-07-19
 logs/trade.log.2026-07-20
 *.pyc
 logs/trade.log.2026-07-22
+
+# Local database repair backups
+*.db.before-*
+*.sqlite3.before-*

@@ -14,6 +14,7 @@ from telegram_bot import create_telegram_notifier
 from database import Database
 from rammonitor import RamMonitor
 from trademanager import TradeManager
+from live_accounting import apply_execution_to_ledger, resolve_close_fill
 from trade_csv_logger import TradeCSVLogger
 from trade_executor import add_api_trade_argument, get_trade_executor
 from env_loader import load_dotenv_file
@@ -630,6 +631,8 @@ def ma_strategy(state, manual_action=None):
 
     # setup DB and restore persisted balance state
     db = Database(db_name="database.db")
+    if not TOOBIT_SYNC_BALANCE:
+        db.assert_local_ledger()
     state_mode = _get_balance_state_mode()
     save_money = db.get_current_save_money(default=save_money)
     if not initial_balance_locked:
@@ -774,14 +777,6 @@ def ma_strategy(state, manual_action=None):
             margin_no_fee = open_order.get('margin_no_fee')
         if open_order.get('position_size_no_fee') is not None:
             position_size_no_fee = open_order.get('position_size_no_fee')
-        # Older live rows may contain Toobit contract count in position_size,
-        # while position_size_no_fee retains the strategy's BTC/demo size.
-        if position_size_no_fee not in (None, 0) and (
-            position_size in (None, 0)
-            or float(position_size) > float(position_size_no_fee) * 10
-            or float(position_size_no_fee) > float(position_size) * 10
-        ):
-            position_size = float(position_size_no_fee)
         if open_order.get('current_position') is not None:
             current_position = open_order.get('current_position')
 
@@ -922,6 +917,7 @@ def ma_strategy(state, manual_action=None):
     last_candle_move = abs(close_prices[i] - open_prices[i]) / open_prices[i] if open_prices[i] else 0
     margin_balance = balance + (margin if current_position is not None else 0)
     current_month = _month_key(close_times[i])
+    profit_percent_per_month = db.get_monthly_profit_percent(current_month)
 
     manual_action = (manual_action or "").strip().lower()
     manual_mode = bool(manual_action)
@@ -1083,6 +1079,8 @@ def ma_strategy(state, manual_action=None):
                         leverage,
                     )
 
+                    execution_entry_price = None
+                    execution_base_quantity = None
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
                             _warn_if_unowned_remote_position()
@@ -1120,18 +1118,15 @@ def ma_strategy(state, manual_action=None):
                                     "live closing will remain disabled until it can be verified."
                                 )
                             else:
-                                # Toobit's executedQty is a number of futures
-                                # contracts, not a BTC quantity.
                                 base_quantity = float(bot_quantity) * contract_multiplier
-                                updates["position_size"] = base_quantity
-                                updates["position_value"] = updates["entry_price"] * base_quantity
                                 fill_price = TOOBIT_CLIENT.resolve_average_fill_price(
-                                    response=result,
-                                    client_order_id=client_order_id,
+                                    response=result, client_order_id=client_order_id,
                                 )
-                                if fill_price is not None:
-                                    updates["entry_price"] = fill_price
-                                    updates["position_value"] = fill_price * base_quantity
+                                execution_entry_price = fill_price
+                                execution_base_quantity = base_quantity
+                                apply_execution_to_ledger(
+                                    updates, base_quantity, fill_price, TOOBIT_SYNC_BALANCE,
+                                )
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
                             _persist_state()
@@ -1189,11 +1184,14 @@ def ma_strategy(state, manual_action=None):
                         fee_rate=fee_rate,
                         save_money=save_money,
                         total_assets=balance + margin + save_money,
+                        ledger_mode="toobit" if TOOBIT_SYNC_BALANCE else "local",
+                        execution_entry_price=execution_entry_price,
+                        execution_base_quantity=execution_base_quantity,
                     )
 
                     logger.info(
                         f"ORDER OPENED #{order_id}: LONG @ {entry_price} | "
-                        f"margin={margin} | lev={leverage} | "
+                        f"margin={margin} | lev={leverage} | ledger={state_mode} | "
                         f"trade_time={format_utc_timestamp(open_time_value)}",
                         extra={"category": "trade"},
                     )
@@ -1256,6 +1254,7 @@ def ma_strategy(state, manual_action=None):
                 print("Cannot close LONG: position_size unknown.")
                 _persist_state()
                 return
+            execution_close_price = close_prices[i]
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
                     if order_id is None or not str(client_order_id or "").startswith("BOT_"):
@@ -1268,12 +1267,19 @@ def ma_strategy(state, manual_action=None):
                             db.update_order_execution(order_id, bot_quantity=bot_quantity)
                     if bot_quantity in (None, 0):
                         raise RuntimeError("Bot-owned LONG quantity is unknown; refusing live close.")
-                    TOOBIT_CLIENT.close_position(
+                    close_response = TOOBIT_CLIENT.close_position(
                         TOOBIT_SYMBOL,
                         side="LONG",
                         strategy="MA",
                         quantity=bot_quantity,
                     )
+                    fill_close_price = resolve_close_fill(TOOBIT_CLIENT, close_response)
+                    db.update_execution_close(order_id, fill_close_price, close_response.get("client_order_id"))
+                    if TOOBIT_SYNC_BALANCE:
+                        if fill_close_price is None:
+                            logger.warning("Exchange close price unavailable; exchange ledger PnL is estimated")
+                        else:
+                            execution_close_price = fill_close_price
                 except Exception as e:
                     logger.exception(f"Toobit close LONG failed: {e}")
                     _persist_state()
@@ -1281,7 +1287,7 @@ def ma_strategy(state, manual_action=None):
 
             prev_trade_power = trade_power
             updates = trade_manager.close_long(
-                close_prices[i],
+                execution_close_price,
                 close_times[i],
                 entry_price,
                 position_size,
@@ -1384,7 +1390,7 @@ def ma_strategy(state, manual_action=None):
                 try:
                     db.update_order_close(
                         order_id=order_id,
-                        close_price=close_prices[i],
+                        close_price=execution_close_price,
                         close_time=close_times[i],
                         profit=profit,
                         profit_percent=profit_percent,
@@ -1401,13 +1407,14 @@ def ma_strategy(state, manual_action=None):
 
             logger.info(
                 f"ORDER CLOSED #{order_id}: LONG | "
-                f"exit={close_prices[i]} | profit={profit} | "
+                f"exit={execution_close_price} | pnl={pnl} | profit={profit} | "
+                f"balance={balance} | total_assets={total_balance} | ledger={state_mode} | "
                 f"trade_time={format_utc_timestamp(close_times[i])}",
                 extra={"category": "trade"},
             )
             if telegram_alerts:
                 signal_message.send_close_long(
-                    price=close_prices[i],
+                    price=execution_close_price,
                     time_str=close_times[i],
                     profit=profit,
                     profit_percent=profit_percent,
@@ -1507,6 +1514,8 @@ def ma_strategy(state, manual_action=None):
                         leverage,
                     )
 
+                    execution_entry_price = None
+                    execution_base_quantity = None
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
                             _warn_if_unowned_remote_position()
@@ -1544,18 +1553,15 @@ def ma_strategy(state, manual_action=None):
                                     "live closing will remain disabled until it can be verified."
                                 )
                             else:
-                                # Toobit's executedQty is a number of futures
-                                # contracts, not a BTC quantity.
                                 base_quantity = float(bot_quantity) * contract_multiplier
-                                updates["position_size"] = base_quantity
-                                updates["position_value"] = updates["entry_price"] * base_quantity
                                 fill_price = TOOBIT_CLIENT.resolve_average_fill_price(
-                                    response=result,
-                                    client_order_id=client_order_id,
+                                    response=result, client_order_id=client_order_id,
                                 )
-                                if fill_price is not None:
-                                    updates["entry_price"] = fill_price
-                                    updates["position_value"] = fill_price * base_quantity
+                                execution_entry_price = fill_price
+                                execution_base_quantity = base_quantity
+                                apply_execution_to_ledger(
+                                    updates, base_quantity, fill_price, TOOBIT_SYNC_BALANCE,
+                                )
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
                             _persist_state()
@@ -1613,11 +1619,14 @@ def ma_strategy(state, manual_action=None):
                         fee_rate=fee_rate,
                         save_money=save_money,
                         total_assets=balance + margin + save_money,
+                        ledger_mode="toobit" if TOOBIT_SYNC_BALANCE else "local",
+                        execution_entry_price=execution_entry_price,
+                        execution_base_quantity=execution_base_quantity,
                     )
 
                     logger.info(
                         f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | "
-                        f"margin={margin} | lev={leverage} | "
+                        f"margin={margin} | lev={leverage} | ledger={state_mode} | "
                         f"trade_time={format_utc_timestamp(open_time_value)}",
                         extra={"category": "trade"},
                     )
@@ -1681,6 +1690,7 @@ def ma_strategy(state, manual_action=None):
                 print("Cannot close SHORT: position_size unknown.")
                 _persist_state()
                 return
+            execution_close_price = close_prices[i]
             if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                 try:
                     if order_id is None or not str(client_order_id or "").startswith("BOT_"):
@@ -1693,12 +1703,19 @@ def ma_strategy(state, manual_action=None):
                             db.update_order_execution(order_id, bot_quantity=bot_quantity)
                     if bot_quantity in (None, 0):
                         raise RuntimeError("Bot-owned SHORT quantity is unknown; refusing live close.")
-                    TOOBIT_CLIENT.close_position(
+                    close_response = TOOBIT_CLIENT.close_position(
                         TOOBIT_SYMBOL,
                         side="SHORT",
                         strategy="MA",
                         quantity=bot_quantity,
                     )
+                    fill_close_price = resolve_close_fill(TOOBIT_CLIENT, close_response)
+                    db.update_execution_close(order_id, fill_close_price, close_response.get("client_order_id"))
+                    if TOOBIT_SYNC_BALANCE:
+                        if fill_close_price is None:
+                            logger.warning("Exchange close price unavailable; exchange ledger PnL is estimated")
+                        else:
+                            execution_close_price = fill_close_price
                 except Exception as e:
                     logger.exception(f"Toobit close SHORT failed: {e}")
                     _persist_state()
@@ -1706,7 +1723,7 @@ def ma_strategy(state, manual_action=None):
 
             prev_trade_power = trade_power
             updates = trade_manager.close_short(
-                close_prices[i],
+                execution_close_price,
                 close_times[i],
                 entry_price,
                 position_size,
@@ -1809,7 +1826,7 @@ def ma_strategy(state, manual_action=None):
                 try:
                     db.update_order_close(
                         order_id=order_id,
-                        close_price=close_prices[i],
+                        close_price=execution_close_price,
                         close_time=close_times[i],
                         profit=profit,
                         profit_percent=profit_percent,
@@ -1826,13 +1843,14 @@ def ma_strategy(state, manual_action=None):
 
             logger.info(
                 f"ORDER CLOSED #{order_id}: SHORT | "
-                f"exit={close_prices[i]} | profit={profit} | "
+                f"exit={execution_close_price} | pnl={pnl} | profit={profit} | "
+                f"balance={balance} | total_assets={total_balance} | ledger={state_mode} | "
                 f"trade_time={format_utc_timestamp(close_times[i])}",
                 extra={"category": "trade"},
             )
             if telegram_alerts:
                 signal_message.send_close_short(
-                    price=close_prices[i],
+                    price=execution_close_price,
                     time_str=close_times[i],
                     profit=profit,
                     profit_percent=profit_percent,
@@ -1872,95 +1890,96 @@ def wait_for_next_quarter():
 
 
 # ==== start app here ====
-parser = argparse.ArgumentParser(description="Trading bot")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Trading bot")
 
-parser.add_argument(
-    "--rammonitor",
-    action="store_true",
-    help="Enable RAM monitor"
-)
+    parser.add_argument(
+        "--rammonitor",
+        action="store_true",
+        help="Enable RAM monitor"
+    )
 
-parser.add_argument(
-    "--test",
-    action="store_true",
-    help="Enable a test Bot with out using time filter"
-)
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Enable a test Bot with out using time filter"
+    )
 
-add_api_trade_argument(parser)
+    add_api_trade_argument(parser)
 
-manual_group = parser.add_mutually_exclusive_group()
-manual_group.add_argument(
-    "--open_long",
-    action="store_true",
-    help="Force open LONG using live execution path (Toobit/DB/Telegram)."
-)
-manual_group.add_argument(
-    "--close_long",
-    action="store_true",
-    help="Force close LONG using live execution path (Toobit/DB/Telegram)."
-)
-manual_group.add_argument(
-    "--open_short",
-    action="store_true",
-    help="Force open SHORT using live execution path (Toobit/DB/Telegram)."
-)
-manual_group.add_argument(
-    "--close_short",
-    action="store_true",
-    help="Force close SHORT using live execution path (Toobit/DB/Telegram)."
-)
+    manual_group = parser.add_mutually_exclusive_group()
+    manual_group.add_argument(
+        "--open_long",
+        action="store_true",
+        help="Force open LONG using live execution path (Toobit/DB/Telegram)."
+    )
+    manual_group.add_argument(
+        "--close_long",
+        action="store_true",
+        help="Force close LONG using live execution path (Toobit/DB/Telegram)."
+    )
+    manual_group.add_argument(
+        "--open_short",
+        action="store_true",
+        help="Force open SHORT using live execution path (Toobit/DB/Telegram)."
+    )
+    manual_group.add_argument(
+        "--close_short",
+        action="store_true",
+        help="Force close SHORT using live execution path (Toobit/DB/Telegram)."
+    )
 
-args = parser.parse_args()
-print(f"API Trade Mode: {args.api_trade.upper().replace('-', ' ')}")
-TOOBIT_CLIENT = get_trade_executor(
-    args.api_trade,
-    base_url=TOOBIT_BASE_URL,
-    category=TOOBIT_CATEGORY,
-    balance_asset=TOOBIT_BALANCE_ASSET,
-    recv_window=TOOBIT_RECV_WINDOW,
-    timeout=TOOBIT_TIMEOUT_SECONDS,
-    max_retries=TOOBIT_MAX_RETRIES,
-    backoff_base_seconds=TOOBIT_BACKOFF_BASE_SECONDS,
-    max_backoff_seconds=TOOBIT_BACKOFF_MAX_SECONDS,
-)
-BOT_STATE.api_trade = args.api_trade
+    args = parser.parse_args()
+    print(f"API Trade Mode: {args.api_trade.upper().replace('-', ' ')}")
+    TOOBIT_CLIENT = get_trade_executor(
+        args.api_trade,
+        base_url=TOOBIT_BASE_URL,
+        category=TOOBIT_CATEGORY,
+        balance_asset=TOOBIT_BALANCE_ASSET,
+        recv_window=TOOBIT_RECV_WINDOW,
+        timeout=TOOBIT_TIMEOUT_SECONDS,
+        max_retries=TOOBIT_MAX_RETRIES,
+        backoff_base_seconds=TOOBIT_BACKOFF_BASE_SECONDS,
+        max_backoff_seconds=TOOBIT_BACKOFF_MAX_SECONDS,
+    )
+    BOT_STATE.api_trade = args.api_trade
 
-# you can turn on to see bot ram usage:  ----> True/False
-# ================= RAM MONITOR =================
-if args.rammonitor:
-    ram_monitor = RamMonitor(interval=2, warn_mb=500)
-    ram_monitor.start()
+    # you can turn on to see bot ram usage:  ----> True/False
+    # ================= RAM MONITOR =================
+    if args.rammonitor:
+        ram_monitor = RamMonitor(interval=2, warn_mb=500)
+        ram_monitor.start()
 
-# ---- initialize Toobit balance (live trading) ----
-if TOOBIT_ENABLED:
-    try:
-        init_toobit_balance(BOT_STATE)
-    except Exception as e:
-        logger.exception(f"Toobit init failed, disabling live trading: {e}")
-        TOOBIT_ENABLED = False
-        TOOBIT_EXECUTE_ORDERS = False
+    # ---- initialize Toobit balance (live trading) ----
+    if TOOBIT_ENABLED:
+        try:
+            init_toobit_balance(BOT_STATE)
+        except Exception as e:
+            logger.exception(f"Toobit init failed, disabling live trading: {e}")
+            TOOBIT_ENABLED = False
+            TOOBIT_EXECUTE_ORDERS = False
 
-manual_action = None
-if args.open_long:
-    manual_action = "open_long"
-elif args.close_long:
-    manual_action = "close_long"
-elif args.open_short:
-    manual_action = "open_short"
-elif args.close_short:
-    manual_action = "close_short"
+    manual_action = None
+    if args.open_long:
+        manual_action = "open_long"
+    elif args.close_long:
+        manual_action = "close_long"
+    elif args.open_short:
+        manual_action = "open_short"
+    elif args.close_short:
+        manual_action = "close_short"
 
-# MAIN LOOP 
-while True:
-    if manual_action is not None:
-        ma_strategy(BOT_STATE, manual_action=manual_action)
-        break
-    elif args.test:
-        ma_strategy(BOT_STATE)
-        break
+    # MAIN LOOP 
+    while True:
+        if manual_action is not None:
+            ma_strategy(BOT_STATE, manual_action=manual_action)
+            break
+        elif args.test:
+            ma_strategy(BOT_STATE)
+            break
 
-    else:
-        wait_for_next_quarter()
-        ma_strategy(BOT_STATE)
+        else:
+            wait_for_next_quarter()
+            ma_strategy(BOT_STATE)
 
-    time.sleep(FETCH_WINDOW_SECONDS + 1)
+        time.sleep(FETCH_WINDOW_SECONDS + 1)

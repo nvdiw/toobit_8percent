@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import math
 import sqlite3
+from live_accounting import EXECUTION_SCHEMA
 
 
 class Database:
@@ -134,6 +135,8 @@ class Database:
         self._ensure_order_columns()
         self._ensure_order_layout()
         self._backfill_order_metrics()
+        self.cursor.execute(EXECUTION_SCHEMA)
+        self.conn.commit()
 
     # ---------- INSERT METHODS ----------
 
@@ -160,7 +163,8 @@ class Database:
                      margin_no_fee=None, position_size_no_fee=None, current_position=None, client_order_id=None,
                      exchange_order_id=None, bot_quantity=None, position_value=None,
                      position_value_no_fee=None, trade_amount_percent=None, fee_rate=None, save_money=None,
-                     total_assets=None):
+                     total_assets=None, ledger_mode="legacy", execution_entry_price=None,
+                     execution_base_quantity=None):
         # extended insert supporting additional balance and fee-related fields
         self.cursor.execute("""
         INSERT INTO orders (
@@ -178,8 +182,13 @@ class Database:
             exchange_order_id, bot_quantity, position_value, position_value_no_fee,
             trade_amount_percent, fee_rate, save_money, total_assets
         ))
+        order_id = self.cursor.lastrowid
+        self.cursor.execute(
+            "INSERT INTO order_accounting (order_id, ledger_mode, execution_entry_price, execution_base_quantity) VALUES (?, ?, ?, ?)",
+            (order_id, ledger_mode, execution_entry_price, execution_base_quantity),
+        )
         self.conn.commit()
-        return self.cursor.lastrowid
+        return order_id
 
     def update_order_close(self, order_id, close_price, close_time, profit, profit_percent, balance,
                             balance_without_fee, margin, margin_no_fee, status="closed", *, pnl=None,
@@ -212,6 +221,29 @@ class Database:
         WHERE id = ?
         """, (exchange_order_id, bot_quantity, order_id))
         self.conn.commit()
+
+    def update_execution_close(self, order_id, price, client_order_id=None):
+        self.cursor.execute(
+            "UPDATE order_accounting SET execution_close_price=?, close_client_order_id=?, close_price_source=? WHERE order_id=?",
+            (price, client_order_id, "exchange_fill" if price is not None else "unavailable", order_id),
+        )
+        self.conn.commit()
+
+    def assert_local_ledger(self):
+        """Never resume a local strategy from a legacy mixed-account ledger."""
+        row = self.cursor.execute(
+            "SELECT o.id FROM orders o LEFT JOIN order_accounting a ON a.order_id=o.id "
+            "WHERE a.ledger_mode IS NULL OR a.ledger_mode != 'local' LIMIT 1"
+        ).fetchone()
+        if row:
+            raise RuntimeError("Local ledger needs repair; run repair_local_ledger.py database.db --apply before restarting")
+
+    def get_monthly_profit_percent(self, month):
+        # Use the trade ledger after restart and at every calendar rollover.
+        return self.cursor.execute(
+            "SELECT COALESCE(SUM(profit_percent),0) FROM orders WHERE status='closed' AND substr(close_time,1,7)=?",
+            (month,),
+        ).fetchone()[0]
 
     def get_open_order(self):
         self.cursor.execute("""
