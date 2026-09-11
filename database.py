@@ -222,6 +222,10 @@ class Database:
         """, (exchange_order_id, bot_quantity, order_id))
         self.conn.commit()
 
+    def mark_order_closed_externally(self, order_id, close_time, close_price):
+        from external_close import settle_external_close
+        return settle_external_close(self.conn, order_id, close_time, close_price)
+
     def update_execution_close(self, order_id, price, client_order_id=None):
         self.cursor.execute(
             "UPDATE order_accounting SET execution_close_price=?, close_client_order_id=?, close_price_source=? WHERE order_id=?",

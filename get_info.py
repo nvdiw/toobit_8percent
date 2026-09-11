@@ -1,3 +1,4 @@
+import pending_entry
 import requests
 import time
 import argparse
@@ -753,6 +754,10 @@ def ma_strategy(state, manual_action=None):
     client_order_id = None
     exchange_order_id = None
     bot_quantity = None
+    # The database is authoritative on every cycle, including an external repair.
+    current_position = None
+    entry_price = position_size = position_size_no_fee = open_time_value = entry_index = None
+    margin = margin_no_fee = 0
     if open_order is not None:
         order_id = open_order['id']
         current_position = open_order['side']
@@ -816,9 +821,17 @@ def ma_strategy(state, manual_action=None):
                     side=expected_side,
                 )
                 if not pos:
-                    print("Warning: bot-owned Toobit position is no longer open; no close order will be sent.")
+                    if not str(client_order_id or "").startswith("BOT_"):
+                        raise RuntimeError("Cannot reconcile an order without bot ownership")
+                    db.mark_order_closed_externally(order_id, close_times[-1], close_prices[-1])
+                    balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
                     current_position = None
-                    entry_index = None
+                    entry_price = position_size = position_size_no_fee = open_time_value = entry_index = None
+                    margin = margin_no_fee = 0
+                    logger.info("ORDER CLOSED EXTERNALLY #%s | price=%s | source=last_candle_estimate",
+                                order_id, close_prices[-1], extra={"category": "trade"})
+                    _persist_state()
+                    return
                 elif not str(client_order_id or "").startswith("BOT_"):
                     print("Warning: open DB order has no BOT_ client id; live close is disabled for safety.")
                 elif bot_quantity in (None, 0):
@@ -835,6 +848,8 @@ def ma_strategy(state, manual_action=None):
                         print("Warning: bot order quantity could not be verified; live close is disabled for safety.")
         except Exception as e:
             logger.exception(f"Toobit position sync failed: {e}")
+            _persist_state()
+            return
     else:
         if TOOBIT_SYNC_BALANCE:
             balance, balance_without_fee = db.get_current_balances(initial_balance=first_balance)
@@ -919,6 +934,12 @@ def ma_strategy(state, manual_action=None):
     current_month = _month_key(close_times[i])
     profit_percent_per_month = db.get_monthly_profit_percent(current_month)
 
+    retry_side = pending_entry.eligible_side(db.conn, last_cross_time, current_position)
+    retry_open_long = retry_side == "long" and not manual_action
+    retry_open_short = retry_side == "short" and not manual_action
+    if retry_side:
+        logger.info("PENDING ENTRY | retrying %s for cross %s", retry_side, last_cross_time)
+
     manual_action = (manual_action or "").strip().lower()
     manual_mode = bool(manual_action)
     force_open_long = manual_action == "open_long"
@@ -994,14 +1015,14 @@ def ma_strategy(state, manual_action=None):
         return
 
     # ===================== OPEN LONG =====================
-    if current_position is None and (
-        force_open_long
+    if current_position is None and not retry_open_short and (
+        force_open_long or retry_open_long
         or (cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time)
     ):
         entry_score = 0
         can_try_open = True
 
-        if force_open_long:
+        if force_open_long or retry_open_long:
             entry_score = entry_score_threshold
         elif atr_filter:
             if atr is None or atr_ma is None or atr_ma <= 0:
@@ -1062,12 +1083,14 @@ def ma_strategy(state, manual_action=None):
                     if overextended and cooling:
                         entry_score -= entry_late_penalty
 
-            if entry_score >= entry_score_threshold:
-                if (not force_open_long) and skip_logic and skip_trades_left > 0:
+            if entry_score >= entry_score_threshold or retry_open_long:
+                if (not force_open_long) and (not retry_open_long) and skip_logic and skip_trades_left > 0:
                     skip_trades_left -= 1
                     last_trade_cross_time = last_cross_time
                     print(f"SKIP LONG | skips left: {skip_trades_left}")
                 else:
+                    exchange_open_accepted = False
+                    exchange_open_attempted = False
                     updates = trade_manager.open_long(
                         close_prices[i],
                         close_times[i],
@@ -1083,7 +1106,9 @@ def ma_strategy(state, manual_action=None):
                     execution_base_quantity = None
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
-                            _warn_if_unowned_remote_position()
+                            remote_position_exists = _warn_if_unowned_remote_position()
+                            if retry_open_long and remote_position_exists:
+                                raise RuntimeError("Pending entry blocked: existing exchange position needs reconciliation.")
                             if toobit_balance is None:
                                 toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
@@ -1098,6 +1123,7 @@ def ma_strategy(state, manual_action=None):
                                 TOOBIT_SYMBOL
                             )
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
+                            exchange_open_attempted = True
                             result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="BUY_OPEN",
@@ -1106,6 +1132,8 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                                 strategy="MA",
                             )
+                            exchange_open_accepted = True
+                            pending_entry.clear(db.conn)
                             client_order_id = result["client_order_id"]
                             exchange_order_id = TOOBIT_CLIENT.exchange_order_id(result)
                             bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
@@ -1129,6 +1157,10 @@ def ma_strategy(state, manual_action=None):
                                 )
                         except Exception as e:
                             logger.exception(f"Toobit open LONG failed: {e}")
+                            if not exchange_open_accepted:
+                                pending_entry.remember(db.conn, "long", last_cross_time, e)
+                            if exchange_open_attempted and "-1021" not in str(e):
+                                pending_entry.clear(db.conn)  # Submission outcome is unknown.
                             _persist_state()
                             return
 
@@ -1189,6 +1221,7 @@ def ma_strategy(state, manual_action=None):
                         execution_base_quantity=execution_base_quantity,
                     )
 
+                    pending_entry.clear(db.conn)
                     logger.info(
                         f"ORDER OPENED #{order_id}: LONG @ {entry_price} | "
                         f"margin={margin} | lev={leverage} | ledger={state_mode} | "
@@ -1427,14 +1460,14 @@ def ma_strategy(state, manual_action=None):
 
 
     # ===================== OPEN SHORT =====================
-    if current_position is None and (
-        force_open_short
+    if current_position is None and not retry_open_long and (
+        force_open_short or retry_open_short
         or (cross_seen and last_cross_time is not None and last_trade_cross_time != last_cross_time)
     ):
         entry_score = 0
         can_try_open = True
 
-        if force_open_short:
+        if force_open_short or retry_open_short:
             entry_score = entry_score_threshold
         elif atr_filter:
             if atr is None or atr_ma is None or atr_ma <= 0:
@@ -1497,12 +1530,14 @@ def ma_strategy(state, manual_action=None):
                     if overextended and cooling:
                         entry_score -= entry_late_penalty
 
-            if entry_score >= entry_score_threshold:
-                if (not force_open_short) and skip_logic and skip_trades_left > 0:
+            if entry_score >= entry_score_threshold or retry_open_short:
+                if (not force_open_short) and (not retry_open_short) and skip_logic and skip_trades_left > 0:
                     skip_trades_left -= 1
                     last_trade_cross_time = last_cross_time
                     print(f"SKIP SHORT | skips left: {skip_trades_left}")
                 else:
+                    exchange_open_accepted = False
+                    exchange_open_attempted = False
                     updates = trade_manager.open_short(
                         close_prices[i],
                         close_times[i],
@@ -1518,7 +1553,9 @@ def ma_strategy(state, manual_action=None):
                     execution_base_quantity = None
                     if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
                         try:
-                            _warn_if_unowned_remote_position()
+                            remote_position_exists = _warn_if_unowned_remote_position()
+                            if retry_open_short and remote_position_exists:
+                                raise RuntimeError("Pending entry blocked: existing exchange position needs reconciliation.")
                             if toobit_balance is None:
                                 toobit_balance = TOOBIT_CLIENT.get_balance(asset=TOOBIT_BALANCE_ASSET)
                             live_value_qty = _calc_live_value_quantity(
@@ -1533,6 +1570,7 @@ def ma_strategy(state, manual_action=None):
                                 TOOBIT_SYMBOL
                             )
                             TOOBIT_CLIENT.set_leverage(TOOBIT_SYMBOL, updates["leverage"])
+                            exchange_open_attempted = True
                             result = TOOBIT_CLIENT.place_order(
                                 symbol=TOOBIT_SYMBOL,
                                 side="SELL_OPEN",
@@ -1541,6 +1579,8 @@ def ma_strategy(state, manual_action=None):
                                 order_type="LIMIT",
                                 strategy="MA",
                             )
+                            exchange_open_accepted = True
+                            pending_entry.clear(db.conn)
                             client_order_id = result["client_order_id"]
                             exchange_order_id = TOOBIT_CLIENT.exchange_order_id(result)
                             bot_quantity = TOOBIT_CLIENT.resolve_executed_quantity(
@@ -1564,6 +1604,10 @@ def ma_strategy(state, manual_action=None):
                                 )
                         except Exception as e:
                             logger.exception(f"Toobit open SHORT failed: {e}")
+                            if not exchange_open_accepted:
+                                pending_entry.remember(db.conn, "short", last_cross_time, e)
+                            if exchange_open_attempted and "-1021" not in str(e):
+                                pending_entry.clear(db.conn)  # Submission outcome is unknown.
                             _persist_state()
                             return
 
@@ -1624,6 +1668,7 @@ def ma_strategy(state, manual_action=None):
                         execution_base_quantity=execution_base_quantity,
                     )
 
+                    pending_entry.clear(db.conn)
                     logger.info(
                         f"ORDER OPENED #{order_id}: SHORT @ {entry_price} | "
                         f"margin={margin} | lev={leverage} | ledger={state_mode} | "
@@ -1889,6 +1934,27 @@ def wait_for_next_quarter():
 
 
 
+def run_strategy_with_immediate_retries(state, manual_action=None):
+    """Retry a known rejected entry now, then every two seconds, across candles."""
+    ma_strategy(state, manual_action=manual_action)
+    attempts = 0
+    while TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS:
+        check_db = Database()
+        try:
+            queued = pending_entry.has_pending(check_db.conn)
+        finally:
+            check_db.close()
+        if not queued:
+            return
+        if attempts:
+            time.sleep(2)
+        attempts += 1
+        logger.info("IMMEDIATE ENTRY RETRY | attempt=%s", attempts)
+        # Re-read candles/ledger and validate the original cross each time.
+        # A manual action is not forced again after an ambiguous response.
+        ma_strategy(state)
+
+
 # ==== start app here ====
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trading bot")
@@ -1955,9 +2021,8 @@ if __name__ == "__main__":
         try:
             init_toobit_balance(BOT_STATE)
         except Exception as e:
-            logger.exception(f"Toobit init failed, disabling live trading: {e}")
-            TOOBIT_ENABLED = False
-            TOOBIT_EXECUTE_ORDERS = False
+            logger.exception(f"Toobit init failed; stopping without creating demo trades: {e}")
+            raise SystemExit(1) from e
 
     manual_action = None
     if args.open_long:
@@ -1972,14 +2037,14 @@ if __name__ == "__main__":
     # MAIN LOOP 
     while True:
         if manual_action is not None:
-            ma_strategy(BOT_STATE, manual_action=manual_action)
+            run_strategy_with_immediate_retries(BOT_STATE, manual_action=manual_action)
             break
         elif args.test:
-            ma_strategy(BOT_STATE)
+            run_strategy_with_immediate_retries(BOT_STATE)
             break
 
         else:
             wait_for_next_quarter()
-            ma_strategy(BOT_STATE)
+            run_strategy_with_immediate_retries(BOT_STATE)
 
         time.sleep(FETCH_WINDOW_SECONDS + 1)

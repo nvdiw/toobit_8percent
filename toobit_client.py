@@ -35,6 +35,8 @@ class ToobitClient:
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
         self.max_backoff_seconds = max_backoff_seconds
+        self._server_time_offset_ms = 0.0
+        self._last_time_sync = None
 
     def _retry_delay(self, attempt_index):
         delay = self.backoff_base_seconds * (2 ** max(0, attempt_index - 1))
@@ -82,24 +84,37 @@ class ToobitClient:
         formatted = f"{value:.{precision}f}".rstrip("0").rstrip(".")
         return formatted if formatted else "0"
 
+    def sync_server_time(self):
+        """Estimate exchange clock offset without changing the Windows clock."""
+        started = time.time() * 1000
+        response = requests.get(f"{self.base_url}/api/v1/time", timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        finished = time.time() * 1000
+        server_time = int(payload["serverTime"])
+        self._server_time_offset_ms = server_time - (started + finished) / 2
+        self._last_time_sync = time.monotonic()
+        return self._server_time_offset_ms
+
     def _signed_request(self, method, path, params=None):
         api_key, api_secret = self._load_keys()
 
         params = params or {}
         params = {k: v for k, v in params.items() if v is not None}
-        params["timestamp"] = int(time.time() * 1000)
-        params["recvWindow"] = self.recv_window
-
-        query = urlencode([(k, str(params[k])) for k in params])
-        signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-        url = f"{self.base_url}{path}?{query}&signature={signature}"
         headers = {"X-BB-APIKEY": api_key}
 
         total_attempts = self.max_retries + 1
         last_error = None
 
         for attempt in range(1, total_attempts + 1):
+            if self._last_time_sync is None or time.monotonic() - self._last_time_sync >= 60:
+                self.sync_server_time()
+            # Refresh timestamp AND signature on every retry; retain the order ID.
+            params["timestamp"] = int(time.time() * 1000 + self._server_time_offset_ms)
+            params["recvWindow"] = self.recv_window
+            query = urlencode([(k, str(params[k])) for k in params])
+            signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            url = f"{self.base_url}{path}?{query}&signature={signature}"
             try:
                 response = requests.request(method, url, headers=headers, timeout=self.timeout)
             except requests.exceptions.RequestException as exc:
@@ -119,6 +134,16 @@ class ToobitClient:
                     time.sleep(self._retry_delay(attempt))
                     continue
                 raise RuntimeError(f"Toobit non-JSON response: HTTP {response.status_code} -> {text}")
+
+            if isinstance(data, dict) and str(data.get("code")) == "-1021":
+                # Explicit timestamp rejection means this attempt was not accepted.
+                self._last_time_sync = None
+                if attempt < total_attempts:
+                    # First timestamp retry is immediate; repeated rejection
+                    # is paced briefly to avoid a tight request loop.
+                    if attempt > 1:
+                        time.sleep(min(self._retry_delay(attempt - 1), 2.0))
+                    continue
 
             if response.status_code != 200:
                 if self._is_retryable_status(response.status_code) and attempt < total_attempts:
