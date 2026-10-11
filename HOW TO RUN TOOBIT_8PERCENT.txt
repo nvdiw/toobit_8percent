@@ -1,0 +1,4 @@
+terminal 1:
+python get_info.py --ohlcv-source binance
+or
+python get_info.py --ohlcv-source toobit

@@ -1,0 +1,71 @@
+{
+  "backup": "C:\\my_codes\\python_codes\\toobit_8percent\\database.db.before-order18-close-fix-20260911T150412775863Z",
+  "reference": "magnal/database.db orders.id=24",
+  "changes": {
+    "close_time": {
+      "before": "2026-09-11 13:15:00+00:00",
+      "after": "2026-09-11 06:15:00+00:00"
+    },
+    "close_price": {
+      "before": 77711.28,
+      "after": 77410.0
+    },
+    "current_position": {
+      "before": null,
+      "after": "short"
+    },
+    "duration_seconds": {
+      "before": 74700,
+      "after": 49500
+    },
+    "price_change_percent": {
+      "before": -1.011594109838128,
+      "after": -0.6199807806867884
+    },
+    "pnl": {
+      "before": -52.097096656663595,
+      "after": -31.929010205369604
+    },
+    "pnl_percent": {
+      "before": -10.115941098381281,
+      "after": -6.199807806867884
+    },
+    "pnl_no_fee": {
+      "before": -52.097096656663595,
+      "after": -31.929010205369604
+    },
+    "exit_fee": {
+      "before": 2.601048548328332,
+      "after": 2.5909645051026846
+    },
+    "total_fee": {
+      "before": 5.176048548328332,
+      "after": 5.165964505102685
+    },
+    "profit": {
+      "before": -57.27314520499193,
+      "after": -37.094974710472286
+    },
+    "profit_percent": {
+      "before": -5.516250103290235,
+      "after": -3.572794148912156
+    },
+    "balance": {
+      "before": 980.9891549548694,
+      "after": 1001.167325449389
+    },
+    "balance_after_trade": {
+      "before": 980.9891549548694,
+      "after": 1001.167325449389
+    },
+    "balance_without_fee": {
+      "before": 1172.8954035606396,
+      "after": 1193.0634900119335
+    },
+    "total_assets": {
+      "before": 1092.1091549548694,
+      "after": 1112.2873254493888
+    }
+  },
+  "verification": "integrity_check ok; all other records unchanged"
+}

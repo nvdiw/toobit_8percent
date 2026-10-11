@@ -20,7 +20,7 @@ from trade_csv_logger import TradeCSVLogger
 from trade_executor import add_api_trade_argument, get_trade_executor
 from env_loader import load_dotenv_file
 from sync_symbol_data import sync_recent_symbol_data
-from get_ohlcv import get_ohlcv_binance, get_ohlcv_toobit
+from get_ohlcv import add_ohlcv_source_argument, get_ohlcv_binance, get_ohlcv_toobit
 from logging_utils import (
     DailyDirectoryFileHandler,
     RecordCategoryFilter,
@@ -29,6 +29,7 @@ from logging_utils import (
 )
 
 VALID_MINUTES = {0, 15, 30, 45}
+OHLCV_SOURCE = "toobit"
 FETCH_WINDOW_SECONDS = 10
 load_dotenv_file()
 
@@ -584,9 +585,10 @@ def ma_strategy(state, manual_action=None):
     volume_prices = []
     close_times = []
 
-    # get data from binance
+    # Select only the public candle feed; execution remains on Toobit.
+    candle_fetch = get_ohlcv_binance if OHLCV_SOURCE == "binance" else get_ohlcv_toobit
     required_candles = 201
-    data = get_ohlcv_toobit(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
+    data = candle_fetch(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
 
     # If fetch failed (e.g. transient network), retry for a short grace period so the bot doesn't exit
     if not data or len(data) < 2:
@@ -599,7 +601,7 @@ def ma_strategy(state, manual_action=None):
         )
         while time.time() - start_ts < grace:
             time.sleep(retry_interval)
-            data = get_ohlcv_toobit(symbol="BTCUSDT", interval="15m", limit=required_candles)
+            data = candle_fetch(symbol="BTCUSDT", interval="15m", limit=required_candles)
             if data and len(data) >= 2:
                 logger.info("CHECK RECOVERED | OHLCV available", extra={"category": "check"})
                 break
@@ -1972,6 +1974,7 @@ if __name__ == "__main__":
     )
 
     add_api_trade_argument(parser)
+    add_ohlcv_source_argument(parser)
 
     manual_group = parser.add_mutually_exclusive_group()
     manual_group.add_argument(
@@ -1996,6 +1999,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    OHLCV_SOURCE = args.ohlcv_source
+    print(f"OHLCV source: {OHLCV_SOURCE}; execution: Toobit")
     print(f"API Trade Mode: {args.api_trade.upper().replace('-', ' ')}")
     TOOBIT_CLIENT = get_trade_executor(
         args.api_trade,
