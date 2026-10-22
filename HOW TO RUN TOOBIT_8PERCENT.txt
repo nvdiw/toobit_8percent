@@ -1,4 +1,10 @@
 terminal 1:
 python get_info.py --ohlcv-source binance
-or
-python get_info.py --ohlcv-source toobit
+
+Both OHLCV providers are requested concurrently. Binance has priority.
+Toobit fills missing, invalid, or unavailable Binance candles.
+A full fresh 201-candle window is required. Both-provider outages skip the cycle after retries.
+When Binance recovers, it automatically has priority again.
+
+Public data test, without trading:
+python get_ohlcv.py --ohlcv-source toobit --symbol BTCUSDT --interval 15m --limit 201

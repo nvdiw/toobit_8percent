@@ -41,10 +41,10 @@ class BinanceCandleExecutionTests(unittest.TestCase):
         db=Database(str(self.path));self.connections.append(db);return db
 
     def cycle(self,state,action,price,end):
-        with patch.object(self.bot,"TOOBIT_CLIENT",self.client),patch.object(self.bot,"Database",side_effect=self.database),patch.object(self.bot,"TradeCSVLogger",return_value=Mock()),patch.object(self.bot,"logger",Mock()),patch.object(self.bot,"OHLCV_SOURCE","binance"),patch.object(self.bot,"get_ohlcv_binance",side_effect=[None,self.candles(price,end)]) as candle_fetch,patch.object(self.bot,"get_ohlcv_toobit",side_effect=AssertionError("Unexpected Toobit candle request")) as toobit_candles,patch.object(self.bot.time,"sleep"),contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(self.bot,"TOOBIT_CLIENT",self.client),patch.object(self.bot,"Database",side_effect=self.database),patch.object(self.bot,"TradeCSVLogger",return_value=Mock()),patch.object(self.bot,"logger",Mock()),patch.object(self.bot,"OHLCV_SOURCE","binance"),patch.object(self.bot,"fetch_dual_ohlcv",side_effect=[self.bot.CandleUnavailable({"message":"offline"}),(self.candles(price,end),{"message":"Toobit fallback","actual_sources":["toobit"],"fallback_count":201})]) as candle_fetch,patch.object(self.bot.time,"sleep"),contextlib.redirect_stdout(io.StringIO()):
             self.bot.ma_strategy(state,manual_action=action)
             self.assertEqual(candle_fetch.call_count,2)
-            toobit_candles.assert_not_called()
+            self.assertEqual(candle_fetch.call_args.args, ("binance",))
 
     def check_side(self,side):
         state=self.bot.BotState()
@@ -81,3 +81,13 @@ class BinanceCandleExecutionTests(unittest.TestCase):
 
     def test_long_open_restart_close_preserves_local_balance(self): self.check_side("long")
     def test_short_open_restart_close_preserves_local_balance(self): self.check_side("short")
+
+    def test_partial_window_never_reaches_orders(self):
+        state = self.bot.BotState()
+        report = {"message": "", "actual_sources": ["binance"], "fallback_count": 0}
+        rows = self.candles(100, "2026-09-07T00:00:00+00:00")[-3:]
+        with patch.object(self.bot, "TOOBIT_CLIENT", self.client), patch.object(self.bot, "fetch_dual_ohlcv", return_value=(rows, report)), patch.object(self.bot, "OHLCV_SOURCE", "binance"), patch.object(self.bot, "Database") as database, patch.object(self.bot, "TradeCSVLogger", return_value=Mock()), patch.object(self.bot, "logger", Mock()), contextlib.redirect_stdout(io.StringIO()):
+            self.bot.ma_strategy(state, manual_action="open_long")
+        database.assert_not_called()
+        self.client.place_order.assert_not_called()
+        self.client.close_position.assert_not_called()

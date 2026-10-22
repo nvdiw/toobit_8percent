@@ -20,7 +20,7 @@ from trade_csv_logger import TradeCSVLogger
 from trade_executor import add_api_trade_argument, get_trade_executor
 from env_loader import load_dotenv_file
 from sync_symbol_data import sync_recent_symbol_data
-from get_ohlcv import add_ohlcv_source_argument, get_ohlcv_binance, get_ohlcv_toobit
+from get_ohlcv import add_ohlcv_source_argument, fetch_dual_ohlcv, CandleUnavailable, log_ohlcv_report
 from logging_utils import (
     DailyDirectoryFileHandler,
     RecordCategoryFilter,
@@ -29,7 +29,7 @@ from logging_utils import (
 )
 
 VALID_MINUTES = {0, 15, 30, 45}
-OHLCV_SOURCE = "toobit"
+OHLCV_SOURCE = "binance"
 FETCH_WINDOW_SECONDS = 10
 load_dotenv_file()
 
@@ -585,10 +585,20 @@ def ma_strategy(state, manual_action=None):
     volume_prices = []
     close_times = []
 
-    # Select only the public candle feed; execution remains on Toobit.
-    candle_fetch = get_ohlcv_binance if OHLCV_SOURCE == "binance" else get_ohlcv_toobit
+    # Both public feeds are checked; trading still uses the same Toobit client.
     required_candles = 201
-    data = candle_fetch(symbol="BTCUSDT", interval="15m", limit=required_candles)  # BTCUSDT by default
+
+    def candle_fetch(**kwargs):
+        try:
+            rows, report = fetch_dual_ohlcv(OHLCV_SOURCE, **kwargs)
+        except CandleUnavailable as exc:
+            log_ohlcv_report(exc.report, logger, context="toobit_8percent")
+            return None
+        log_ohlcv_report(report, logger, context="toobit_8percent")
+        logger.info("OHLCV WINDOW | latest_open_ms=%s | candles=%s", rows[-1][0], len(rows), extra={"category": "check"})
+        return rows
+
+    data = candle_fetch(symbol="BTCUSDT", interval="15m", limit=required_candles)
 
     # If fetch failed (e.g. transient network), retry for a short grace period so the bot doesn't exit
     if not data or len(data) < 2:
@@ -615,14 +625,15 @@ def ma_strategy(state, manual_action=None):
             _persist_state()
             return
 
-    # validate we have enough candles for indicators (warn but continue with available data)
-    if len(data) < required_candles:
-        logger.warning(
-            f"CHECK PARTIAL | candles={len(data)} | expected={required_candles}",
+    if len(data) != required_candles:
+        logger.error(
+            f"CHECK FAILED | incomplete OHLCV | candles={len(data)} | expected={required_candles} | cycle skipped",
             extra={"category": "check"},
         )
+        _persist_state()
+        return
 
-    # Fetch OHLCV data from Binance and normalize candle timestamps (UTC)
+    # Normalize the validated public candle window to UTC
     for i in range(len(data) - 1):
         open_times.append(str(datetime.fromtimestamp(data[i][0] / 1000, tz=timezone.utc)))
         open_prices.append(float(data[i][1]))
@@ -892,20 +903,10 @@ def ma_strategy(state, manual_action=None):
         tactical_balance,
         monthly_close_filter,
         monthly_compound,
-        leverage,
+        globals()["leverage"],  # Configured entry ceiling; open orders retain their saved leverage.
         safe_leverage_low,
         safe_leverage_med,
         safe_leverage_high,
-        leverage_balance=(
-            toobit_balance
-            if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS
-            else balance
-        ),
-        leverage_tactical_balance=(
-            toobit_tactical_balance
-            if TOOBIT_ENABLED and TOOBIT_EXECUTE_ORDERS
-            else tactical_balance
-        ),
     )
 
     # ----- Detect last EMA16 / MA50 cross inside fetched window -----

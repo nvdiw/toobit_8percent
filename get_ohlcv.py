@@ -1,9 +1,11 @@
 """Public candle data only; balances and order execution remain on Toobit."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import math
 import sys
+import time
 
 import requests
 
@@ -21,7 +23,7 @@ INTERVAL_MS = {
 }
 
 
-def add_ohlcv_source_argument(parser, *, default="toobit"):
+def add_ohlcv_source_argument(parser, *, default="binance"):
     parser.add_argument(
         "--ohlcv-source", type=str.lower, choices=OHLCV_SOURCES, default=default,
         help="Candle provider only. Balances and all orders remain on Toobit.",
@@ -76,6 +78,103 @@ def fetch_ohlcv(source="toobit", symbol="BTCUSDT", interval="15m", limit=100,
         tail = list(row[7:12])
         result.append([opened, *row[1:6], closed, *tail, *(["0"] * (5 - len(tail)))])
     return result
+
+
+class CandleUnavailable(ValueError):
+    """Neither provider can complete this candle window; no decision is safe."""
+    def __init__(self, report):
+        self.report = report
+        super().__init__(report['message'])
+
+
+def fetch_dual_ohlcv(source='binance', symbol='BTCUSDT', interval='15m', limit=201,
+                     *, start_time=None, now_ms=None, request=None):
+    """Read both public feeds and fill missing primary candles by timestamp.
+
+    A complete, fresh, contiguous window is required. The saved preference is
+    never changed by fallback, so recovery automatically returns to it.
+    """
+    validate_source(source)
+    step = INTERVAL_MS[interval]
+    now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    current = now_ms // step * step
+    first = int(start_time) if start_time is not None else current - (limit - 1) * step
+    last = min(current, first + (limit - 1) * step)
+    if first < 0 or first % step or first > last:
+        raise ValueError('Invalid candle window')
+    secondary = 'toobit' if source == 'binance' else 'binance'
+    report = dict(level='ok', requested_source=source, checked_at_ms=now_ms,
+                  actual_sources=[], fallback_count=0, providers={}, message='',
+                  expected_candles=(last - first) // step + 1, missing_count=0)
+
+    def read(provider):
+        try:
+            rows = fetch_ohlcv(provider, symbol, interval, limit, start_time=start_time, request=request)
+            if any(row[0] % step or row[0] > current for row in rows):
+                raise ValueError('Feed returned a misaligned or future candle')
+            return rows, ''
+        except (requests.RequestException, ValueError, TypeError, OverflowError) as exc:
+            return [], f'{type(exc).__name__}: {exc}'[:500]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {provider: pool.submit(read, provider) for provider in (source, secondary)}
+        windows = {}
+        for provider, future in futures.items():
+            rows, error = future.result()
+            windows[provider] = {int(row[0]): row for row in rows}
+            covered = sum(opened in windows[provider] for opened in range(first, last + 1, step))
+            report['providers'][provider] = dict(available=covered == (last-first)//step+1,
+                candles=covered, error=error or ('دادهٔ کندل ناقص یا قدیمی است.' if covered != (last-first)//step+1 else ''))
+    selected, origins, missing = [], set(), []
+    for opened in range(first, last + 1, step):
+        provider = source if opened in windows[source] else secondary
+        row = windows[provider].get(opened)
+        if row is None:
+            missing.append(opened)
+            continue
+        selected.append(row)
+        origins.add(provider)
+        report['fallback_count'] += provider != source
+    report['actual_sources'] = sorted(origins)
+    report['missing_count'] = len(missing)
+    if missing:
+        report.update(level='error', message=f'کندل معتبر در هیچ‌کدام از منابع موجود نیست؛ این چرخه رد شد. {len(missing)} کندل مفقود.')
+        raise CandleUnavailable(report)
+    if report['fallback_count']:
+        report.update(level='warning', message=f'{source.title()} در دسترس نیست یا دادهٔ کامل ندارد؛ {report["fallback_count"]} کندل از {secondary.title()} جایگزین شد.')
+    elif not report['providers'][secondary]['available']:
+        report.update(level='warning', message=f'منبع اصلی {source.title()} سالم است؛ منبع پشتیبان {secondary.title()} در دسترس نیست یا دادهٔ کامل ندارد.')
+    return selected, report
+
+
+def log_ohlcv_report(report, logger, *, context='market'):
+    """Log both providers, the actual selection and recovery, with no trading."""
+    extra = {'category': 'check'}
+    states = getattr(logger, '_ohlcv_provider_states', None)
+    if not isinstance(states, dict):
+        states = {}
+        logger._ohlcv_provider_states = states
+    expected = report.get('expected_candles', '?')
+    for provider, status in report.get('providers', {}).items():
+        available = bool(status.get('available'))
+        key = (context, provider)
+        if available:
+            label = 'RECOVERED' if states.get(key) is False else 'OK'
+            logger.info('OHLCV PROVIDER %s | context=%s | provider=%s | candles=%s/%s',
+                label, context, provider, status.get('candles', 0), expected, extra=extra)
+        else:
+            error = ' '.join(str(status.get('error') or 'Missing or stale candles').split())[:500]
+            write = logger.error if report.get('level') == 'error' else logger.warning
+            write('OHLCV PROVIDER ERROR | context=%s | provider=%s | candles=%s/%s | error=%s',
+                context, provider, status.get('candles', 0), expected, error, extra=extra)
+        states[key] = available
+    sources = ','.join(report.get('actual_sources', [])) or 'none'
+    if report.get('level') == 'error':
+        logger.error('OHLCV UNAVAILABLE | context=%s | preferred=%s | sources=%s | missing=%s | action=skip_cycle',
+            context, report.get('requested_source'), sources, report.get('missing_count', '?'), extra=extra)
+    else:
+        logger.info('OHLCV READY | context=%s | preferred=%s | sources=%s | candles=%s | fallback=%s | action=continue',
+            context, report.get('requested_source'), sources, expected, report.get('fallback_count', 0), extra=extra)
 
 
 def _legacy_fetch(source, symbol, interval, limit):

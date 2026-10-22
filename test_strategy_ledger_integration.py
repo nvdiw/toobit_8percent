@@ -41,8 +41,23 @@ class StrategyLedgerIntegrationTests(unittest.TestCase):
         db=Database(str(self.path));self.connections.append(db);return db
 
     def cycle(self,state,action,price,end):
-        with patch.object(self.bot,"TOOBIT_CLIENT",self.client),patch.object(self.bot,"Database",side_effect=self.database),patch.object(self.bot,"TradeCSVLogger",return_value=Mock()),patch.object(self.bot,"logger",Mock()),patch.object(self.bot,"get_ohlcv_toobit",return_value=self.candles(price,end)),contextlib.redirect_stdout(io.StringIO()):
-            self.bot.ma_strategy(state,manual_action=action)
+        rows = self.candles(price, end)
+        report = dict(level="warning", requested_source=self.bot.OHLCV_SOURCE,
+            actual_sources=["toobit"], fallback_count=len(rows),
+            expected_candles=len(rows), missing_count=0,
+            providers={"binance": dict(available=False, candles=0, error="fixture offline"),
+                       "toobit": dict(available=True, candles=len(rows), error="")})
+        with (patch.object(self.bot, "TOOBIT_CLIENT", self.client),
+              patch.object(self.bot, "Database", side_effect=self.database),
+              patch.object(self.bot, "TradeCSVLogger", return_value=Mock()),
+              patch.object(self.bot, "logger", Mock()),
+              patch.object(self.bot, "fetch_dual_ohlcv", return_value=(rows, report)) as feed,
+              patch("requests.sessions.Session.request",
+                    side_effect=AssertionError("Integration fixtures must not contact the network")),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.bot.ma_strategy(state, manual_action=action)
+        feed.assert_called_once_with(self.bot.OHLCV_SOURCE,
+            symbol="BTCUSDT", interval="15m", limit=201)
 
     def check_side(self,side):
         state=self.bot.BotState()
@@ -78,3 +93,46 @@ class StrategyLedgerIntegrationTests(unittest.TestCase):
 
     def test_long_open_restart_close_preserves_local_balance(self): self.check_side("long")
     def test_short_open_restart_close_preserves_local_balance(self): self.check_side("short")
+
+    def test_demo_leverage_survives_live_budget_and_wallet_changes(self):
+        for side in ("long", "short"):
+            for demo_balance, expected_leverage in ((809.4731445074965, 2), (1000., 10)):
+                for budget, available in ((200., 550.), (550., 550.), (200., 75.), (2000., 400.)):
+                    with self.subTest(side=side, demo=demo_balance, budget=budget, available=available):
+                        self.path = Path(self.temp.name) / f"{side}-{demo_balance}-{budget}-{available}.db"
+                        db = self.database()
+                        db.set_balance_state("local", 1000, 1030)
+                        db.set_balance_state("toobit", budget, budget)
+                        db.insert_open_order("BTCUSDT", side, 100, "2026-09-06T00:00:00+00:00",
+                            position_size=1, margin=50, leverage=2, status="closed",
+                            balance=demo_balance, balance_without_fee=demo_balance, ledger_mode="local")
+                        self.client.reset_mock()
+                        self.client.get_balance.return_value = available
+                        # The previous position's 2x must not become the next entry ceiling.
+                        state = self.bot.BotState(leverage=2)
+                        self.cycle(state, "open_" + side, 80341.82, "2026-09-07T00:00:00+00:00")
+                        self.client.set_leverage.assert_called_once_with(self.bot.TOOBIT_SYMBOL, expected_leverage)
+                        value = self.client.place_order.call_args.kwargs["value_quantity"]
+                        self.assertEqual(value, min(available, budget * .5) * expected_leverage)
+                        opened = db.get_open_order()
+                        self.assertEqual(opened["leverage"], expected_leverage)
+                        self.assertEqual(opened["margin"], 515.)
+                        self.assertEqual(opened["balance_before_trade"], demo_balance)
+                        self.assertEqual(db.get_balance_state("local")["tactical_balance"], 1030.)
+
+    def test_existing_ten_x_order_is_unchanged_after_restart_and_budget_change(self):
+        self.cycle(self.bot.BotState(), "open_long", 80341.82, "2026-09-07T00:00:00+00:00")
+        db = self.connections[-1]
+        original = db.get_open_order()
+        db.set_balance_state("toobit", 200, 200)
+        self.client.reset_mock()
+        self.client.get_balance.return_value = 75.
+        self.client.get_open_position.return_value = {"side": "LONG"}
+        state = self.bot.BotState()
+        with patch.object(self.bot, "exit_score_threshold", 1000):
+            self.cycle(state, None, 80341.82, "2026-09-07T00:15:00+00:00")
+        self.assertEqual(db.get_open_order(), original)
+        self.assertEqual(state.leverage, 10)
+        self.client.set_leverage.assert_not_called()
+        self.client.place_order.assert_not_called()
+        self.client.close_position.assert_not_called()

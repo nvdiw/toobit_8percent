@@ -20,7 +20,7 @@ class TradeRiskTests(unittest.TestCase):
         self.assertEqual(select_leverage(850, 1000, *args), 3)
         self.assertEqual(select_leverage(800, 1000, *args), 2)
 
-    def test_demo_margin_and_live_leverage_use_separate_tactical_balances(self):
+    def test_demo_balance_and_tactical_balance_own_entry_leverage(self):
         manager = TradeManager(
             csv_logger=None,
             first_balance=1000,
@@ -32,22 +32,18 @@ class TradeRiskTests(unittest.TestCase):
             safe_leverage_low=2,
             safe_leverage_med=3,
             safe_leverage_high=4,
-            leverage_balance=470.75,
-            leverage_tactical_balance=550,
         )
-        opened = manager.open_long(
-            71300.01,
-            "2026-08-20T08:15:00+00:00",
-            balance=983.279073,
-            balance_without_fee=1037.20913,
-            first_balance=1000,
-            trade_amount_percent=0.5,
-            margin_balance=983.279073,
-            leverage=10,
-        )
-
-        self.assertEqual(opened["margin"], 515)
-        self.assertEqual(opened["leverage"], 4)
+        for side in ("long", "short"):
+            for balance, expected in ((809.4731445, 2), (850, 3), (900, 4), (983.279073, 10)):
+                with self.subTest(side=side, balance=balance):
+                    opened = getattr(manager, "open_" + side)(
+                        71300.01, "2026-08-20T08:15:00+00:00",
+                        balance=balance, balance_without_fee=1037.20913,
+                        first_balance=1000, trade_amount_percent=0.5,
+                        margin_balance=balance, leverage=10,
+                    )
+                    self.assertEqual(opened["margin"], 515)
+                    self.assertEqual(opened["leverage"], expected)
 
     def test_margin_falls_with_balance(self):
         self.assertEqual(calculate_margin(1000, 1000, 0.5), 500)
